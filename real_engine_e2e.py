@@ -181,6 +181,9 @@ def main() -> int:
     check("E2 登录成功（JWT cookie）", st == 200 and c.cookie.startswith("vt_token="))
 
     # ---------- E3 真实容器采集 ----------
+    # 先 pull：让本地镜像带 RepoDigests（manifest 口径）——与真实用户"docker run 已拉取镜像"一致
+    for spec in (f"{REG}/e2e-app:v1", f"{REG}/e2e-db:v1", f"{REG}/e2e-app:1.0.0", f"{REG}/e2e-app:pin"):
+        sh_ok(f"docker pull {spec}")
     sh_ok(f"docker run -d --name e2e-web --label com.docker.compose.project=e2e-app --label com.docker.compose.service=web {REG}/e2e-app:v1")
     sh_ok(f"docker run -d --name e2e-db --label com.docker.compose.project=e2e-app --label com.docker.compose.service=db {REG}/e2e-db:v1")
     sh_ok(f"docker run -d --name e2e-pin {REG}/e2e-app:1.0.0")

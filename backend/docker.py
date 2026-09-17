@@ -72,10 +72,14 @@ class LocalDockerClient:
         state = data.get("State") or {}
         health = (state.get("Health") or {}).get("Status", "none")
         image_spec = (data.get("Config") or {}).get("Image", "")
+        repo_digests = data.get("RepoDigests") or []
         return {
             "name": (data.get("Name") or "").lstrip("/"),
             "image": image_spec,
             "image_id": (data.get("Image") or "")[:71] or _fake_digest(image_spec),
+            # manifest 摘要（pull 时记录）：与 registry 检测同口径，用于更新对比；
+            # image_id 是 config digest，仅用于回退定向重建，两者不可混用
+            "repo_digest": repo_digests[0].split("@")[-1] if repo_digests else "",
             "running": state.get("Running", False),
             "health": health if health != "none" else "none",
             "labels": labels,
@@ -185,6 +189,7 @@ class MockDockerClient:
             "name": name,
             "image": image,
             "image_id": _fake_digest(image),
+            "repo_digest": _fake_digest(image),
             "running": running,
             "health": health,
             "labels": dict(labels or {}),
@@ -253,6 +258,7 @@ class MockDockerClient:
             "name": name,
             "image": image,
             "image_id": image_id or self.pull(image),
+            "repo_digest": image_id or self.pull(image),
             "running": False,
             "health": "none",
             "labels": dict(labels or {}),

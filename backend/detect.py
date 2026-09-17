@@ -1,15 +1,17 @@
-"""扫描编排：采集容器 → 双模式检测 → 两级通知（防抖/聚合/自动已读）→ 落库。
+"""扫描编排：采集容器 → 并发双模式检测 → 两级通知（防抖/聚合/自动已读）→ 落库。
 
 对齐 PRD 3.1 / 3.4 / 4.1：
-- 首检基线：本地无摘要记录时只建基线不告警（继承 Vigil 语义）
+- 首检基线：本地无摘要记录时只建基线不告警（继承 Vigil 语义）；
+  但容器运行镜像已落后于上游时（repo_digest ≠ remote）首检即告警——与飞牛/Docker UI 直觉一致
 - update 强提醒（摘要变化，同摘要一次）+ new-tag 弱提醒（Pin-Watch 更高版本 tag，每 tag 一次）
 - 发现通知按 compose 项目聚合为一条（PRD 5.4）；独立容器单独一条
-- 扫描互斥：同一时刻仅允许一次扫描
+- 扫描互斥：同一时刻仅允许一次扫描；容器间 registry 检测并发执行（线程池）
 """
 import hashlib
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 from backend import db, notify
@@ -55,6 +57,9 @@ class StaticRegistrySource:
         _, _, tag = parse_image_spec(spec)
         return RegistryResult(digest=digest, newer_tags=newer_version_tags(tag, tags))
 
+    def close(self) -> None:  # 与 RegistryClient 接口对齐（demo 无资源需释放）
+        pass
+
 
 def make_registry_client() -> Any:
     """演示模式 → 静态源（未知规格 fallback 建基线）；否则真实 HTTP 客户端。"""
@@ -77,7 +82,9 @@ def _sync_containers(docker_client: Any) -> dict[str, dict[str, Any]]:
         service = get_service_name(c) or ""
         protected = 1 if labels.get(PROTECTED_LABEL, "").lower() == "true" else 0
         image_spec = c.get("image", "")
-        local_digest = c.get("image_id") or ""
+        # 更新对比口径：manifest 摘要（pull 时记录的 RepoDigests），与 registry 检测同口径；
+        # 本地构建镜像无 RepoDigests → 置空（首巡仅建基线，不做 digest 对比）
+        local_digest = c.get("repo_digest") or ""
         with db.tx() as conn:
             conn.execute(
                 """
@@ -126,7 +133,9 @@ def _check_target(
     first_seen = not row.get("remote_digest")
 
     result = client.check(image_spec, local_digest, mode)
-    if not first_seen and local_digest and result.digest and result.digest != local_digest:
+    # digest-only 更新判定不受首巡抑制：local(repo_digest) 与 remote 不同即代表
+    # 容器运行镜像落后于上游 —— 与飞牛/Docker UI 的直觉语义一致（曾因首巡基线吞掉落后状态）
+    if local_digest and result.digest and result.digest != local_digest:
         new_digest = result.digest
         events.append(
             {
@@ -239,27 +248,39 @@ def scan(docker_client: Any, force: bool = False) -> dict[str, Any]:
             conn.execute("INSERT INTO scans(started_at) VALUES(?)", (db.now_iso(),))
         containers_map = _sync_containers(docker_client)
         client = make_registry_client()
-        rows = db.query("SELECT * FROM containers")
-        all_events: list[dict[str, Any]] = []
-        checked = errors = 0
-        for row in rows:
-            if not row["check_enabled"] or row["ignored"]:
-                continue
-            try:
-                out = _check_target(
-                    client,
-                    row["name"],
-                    row["image_spec"],
-                    row,
-                    row["mode"],
-                    row["local_digest"],
-                    force,
-                )
-                checked += 1
-                all_events.extend(out["events"])
-            except Exception as e:  # 单容器失败不阻断扫描
-                errors += 1
-                logger.warning("check failed for %s: %s", row["name"], e)
+        try:
+            rows = db.query("SELECT * FROM containers")
+            all_events: list[dict[str, Any]] = []
+            checked = errors = 0
+            targets = [r for r in rows if r["check_enabled"] and not r["ignored"]]
+
+            def _do(row: dict[str, Any]) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+                try:
+                    out = _check_target(
+                        client,
+                        row["name"],
+                        row["image_spec"],
+                        row,
+                        row["mode"],
+                        row["local_digest"],
+                        force,
+                    )
+                    return out, None
+                except Exception as e:  # 单容器失败不阻断扫描
+                    logger.warning("check failed for %s: %s", row["name"], e)
+                    return None, row["name"]
+
+            # 并发检测：瓶颈是 registry 网络往返，线程池 8 并发把逐容器串行等待压缩为批次
+            workers = max(1, min(8, len(targets)))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                for out, failed in ex.map(_do, targets):
+                    if failed:
+                        errors += 1
+                    else:
+                        checked += 1
+                        all_events.extend(out["events"])
+        finally:
+            client.close()
         # 事件聚合 + 两级通知（用 DB 行取 compose_id 做项目聚合）
         db_rows_map = {r["name"]: r for r in db.query("SELECT * FROM containers")}
         pushed = _emit_events(all_events, db_rows_map, force)

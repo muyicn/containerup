@@ -11,6 +11,7 @@ Registry 协议栈（PRD 3.1 / Tugtainer 语义）：
 - INSECURE_REGISTRIES（http 回退）+ REGISTRY_MIRROR 全局改发
 """
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -121,10 +122,26 @@ class RegistryResult:
 
 
 class RegistryClient:
-    """同步 Registry API 客户端（扫描为周期任务，同步实现足够且易测试）。"""
+    """同步 Registry API 客户端（连接池复用 + Bearer token 缓存，支持多线程并发检测）。"""
+
+    _TOKEN_TTL_CAP = 240.0  # Docker Hub expires_in 一般 300s，留余量
 
     def __init__(self, timeout: Optional[float] = None):
         self.timeout = timeout or CONFIG.REGISTRY_TIMEOUT_SEC
+        self._http: Optional[httpx.Client] = None
+        self._token_cache: dict[tuple[str, str, str], tuple[str, float]] = {}
+        self._token_lock = threading.Lock()
+
+    def _client(self) -> httpx.Client:
+        """进程内复用连接池：省去每容器/每请求的 TCP+TLS 握手开销。"""
+        if self._http is None:
+            self._http = httpx.Client(timeout=self.timeout)
+        return self._http
+
+    def close(self) -> None:
+        if self._http is not None:
+            self._http.close()
+            self._http = None
 
     # ---------- 对外主入口 ----------
 
@@ -167,22 +184,22 @@ class RegistryClient:
         if local_digest:
             local_clean = local_digest.split("@")[-1]
             headers["If-None-Match"] = local_clean
-        with httpx.Client(timeout=self.timeout) as client:
+        client = self._client()
+        status, resp_headers = self._do_head(client, url, headers)
+        if status in (401, 403):
+            auth_header = resp_headers.get("www-authenticate", "")
+            if "Bearer" in auth_header:
+                headers["Authorization"] = f"Bearer {self._bearer_token(client, auth_header, repo, insecure)}"
             status, resp_headers = self._do_head(client, url, headers)
-            if status in (401, 403):
-                auth_header = resp_headers.get("www-authenticate", "")
-                if "Bearer" in auth_header:
-                    headers["Authorization"] = f"Bearer {self._bearer_token(client, auth_header, repo, insecure)}"
-                status, resp_headers = self._do_head(client, url, headers)
-            if status == 304:
-                return local_digest
-            if status != 200:
-                raise RuntimeError(f"registry {registry} returned {status} for {repo}:{tag}")
-            return (
-                resp_headers.get("docker-content-digest")
-                or resp_headers.get("etag")
-                or None
-            )
+        if status == 304:
+            return local_digest
+        if status != 200:
+            raise RuntimeError(f"registry {registry} returned {status} for {repo}:{tag}")
+        return (
+            resp_headers.get("docker-content-digest")
+            or resp_headers.get("etag")
+            or None
+        )
 
     def list_tags(self, registry: str, repo: str) -> list[str]:
         """GET /v2/{repo}/tags/list（Pin-Watch 巡检）。"""
@@ -190,19 +207,19 @@ class RegistryClient:
         base = self._base_url(registry, insecure)
         url = f"{base}/v2/{repo}/tags/list"
         headers: dict[str, str] = {}
-        with httpx.Client(timeout=self.timeout) as client:
-            status, resp_headers = self._do_head(client, url, headers)
-            if status in (401, 403):
-                auth_header = resp_headers.get("www-authenticate", "")
-                if "Bearer" in auth_header:
-                    headers["Authorization"] = f"Bearer {self._bearer_token(client, auth_header, repo, insecure)}"
-            resp = client.get(url, headers=headers)
-            if resp.status_code != 200:
-                raise RuntimeError(f"registry {registry} tags list returned {resp.status_code}")
-            return resp.json().get("tags", [])
+        client = self._client()
+        status, resp_headers = self._do_head(client, url, headers)
+        if status in (401, 403):
+            auth_header = resp_headers.get("www-authenticate", "")
+            if "Bearer" in auth_header:
+                headers["Authorization"] = f"Bearer {self._bearer_token(client, auth_header, repo, insecure)}"
+        resp = client.get(url, headers=headers)
+        if resp.status_code != 200:
+            raise RuntimeError(f"registry {registry} tags list returned {resp.status_code}")
+        return resp.json().get("tags", [])
 
     def _bearer_token(self, client: httpx.Client, auth_header: str, repo: str, insecure: bool) -> str:
-        """解析 WWW-Authenticate → realm 获取 token（继承上游 Tugtainer 语义）。"""
+        """解析 WWW-Authenticate → realm 获取 token（带缓存：同 scope 复用，省去每容器重复鉴权）。"""
         parts = auth_header.replace("Bearer ", "")
         items: dict[str, str] = {}
         for item in parts.replace('"', "").split(","):
@@ -216,10 +233,24 @@ class RegistryClient:
             "service": items.get("service", ""),
             "scope": items.get("scope") or f"repository:{repo}:pull",
         }
+        cache_key = (realm, params["service"], params["scope"])
+        now = time.time()
+        with self._token_lock:
+            hit = self._token_cache.get(cache_key)
+            if hit and hit[1] > now:
+                return hit[0]
         resp = client.get(f"{realm}?{urlencode(params)}")
         resp.raise_for_status()
         data = resp.json()
-        return data.get("token") or data.get("access_token") or ""
+        token = data.get("token") or data.get("access_token") or ""
+        if token:
+            try:
+                ttl = min(float(data.get("expires_in") or 300), self._TOKEN_TTL_CAP)
+            except (TypeError, ValueError):
+                ttl = self._TOKEN_TTL_CAP
+            with self._token_lock:
+                self._token_cache[cache_key] = (token, now + ttl)
+        return token
 
     def sleep_throttle(self) -> None:
         if CONFIG.REGISTRY_REQ_DELAY_SEC > 0:
