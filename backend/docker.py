@@ -15,6 +15,7 @@ import subprocess
 from typing import Any, Optional
 
 from backend.config import CONFIG
+from backend.registry import parse_image_spec
 
 
 class DockerError(RuntimeError):
@@ -112,6 +113,32 @@ class LocalDockerClient:
         if out.returncode == 0 and out.stdout.strip():
             return out.stdout.strip()
         return _fake_digest(spec)
+
+    def resolve_image_ref(self, repo_spec: str, digest: str) -> str:
+        """把台账中的 manifest digest 解析为本地可运行的镜像引用。
+
+        优先匹配本地已存在的 RepoDigest；缺失时按 repo@digest 从 registry 重新拉取
+        （镜像被清理后的现实恢复路径）。返回 daemon 可直接 run 的引用。
+        """
+        try:
+            raw = self._run("images", "--digests", "--format", "{{json .}}")
+            for line in raw.splitlines():
+                if not line.strip():
+                    continue
+                img = json.loads(line)
+                if (img.get("Digest") or "") == digest and img.get("ID"):
+                    return img["ID"]
+        except DockerError:
+            pass
+        try:
+            registry, repo, _ = parse_image_spec(repo_spec)
+        except ValueError:
+            registry, repo = "", ""
+        if repo:
+            ref = f"{repo}@{digest}" if registry in {"registry-1.docker.io"} else f"{registry}/{repo}@{digest}"
+            self._run("pull", ref)
+            return self._run("image", "inspect", ref, "--format", "{{.Id}}").strip()
+        return digest
 
     def create(self, name: str, image: str, config: dict[str, Any], labels: Optional[dict] = None, image_id: Optional[str] = None) -> dict[str, Any]:
         # image_id：定向用指定镜像 ID 重建（回退场景；本地 dangling 镜像仍存在时有效）
@@ -212,6 +239,10 @@ class MockDockerClient:
         if spec in self._digest_map:
             return self._digest_map[spec]
         return _fake_digest(spec)
+
+    def resolve_image_ref(self, repo_spec: str, digest: str) -> str:
+        """Mock 无 config/manifest digest 之分，原样返回。"""
+        return digest
 
     def create(
         self, name: str, image: str, config: dict[str, Any], labels: Optional[dict] = None,

@@ -503,9 +503,12 @@ def run_rollback(
             if docker_client.exists(name):
                 docker_client.stop(name)
                 docker_client.remove(name)
+            # 台账 digest 是 registry 的 manifest digest，未必等于本地 Image ID；
+            # 解析为可运行引用（本地缺失时按 repo@digest 重新拉取）
+            image_ref = docker_client.resolve_image_ref(row.get("image_spec", ""), target["digest"])
             docker_client.create(
                 name, row.get("image_spec", ""), dict(current.get("config") or {}),
-                labels=dict(current.get("labels") or {}), image_id=target["digest"],
+                labels=dict(current.get("labels") or {}), image_id=image_ref,
             )
             docker_client.start(name)
             if not engine._wait_healthy(name):
