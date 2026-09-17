@@ -29,7 +29,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/vigiltainer
+            ${{ secrets.DOCKERHUB_USERNAME }}/containerup
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
@@ -40,7 +40,7 @@ jobs:
         with:
           context: .
           load: true
-          tags: vigiltainer:ci
+          tags: containerup:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -49,7 +49,7 @@ jobs:
           docker run -d --name vt-smoke \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -p 9412:9412 \
-            vigiltainer:ci
+            containerup:ci
           ok=""
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:9412/api/public/health >/dev/null 2>&1; then ok=1; break; fi

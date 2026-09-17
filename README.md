@@ -3,17 +3,17 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '91e809e2-7070-4721-859f-59ee0343616f'
-  PropagateID: '91e809e2-7070-4721-859f-59ee0343616f'
-  ReservedCode1: 'c731c185-aba1-4712-a68f-fc25bff97443'
-  ReservedCode2: 'c731c185-aba1-4712-a68f-fc25bff97443'
+  ProduceID: '97044efe-4586-4011-a31b-44af2eb7d2ac'
+  PropagateID: '97044efe-4586-4011-a31b-44af2eb7d2ac'
+  ReservedCode1: '904af496-9fc2-4e26-96e2-cd60fa8b697a'
+  ReservedCode2: '904af496-9fc2-4e26-96e2-cd60fa8b697a'
 ---
 
 # 容器守望者
 
 一体化 Docker 容器更新守望平台：融合 [Tugtainer](https://github.com/Quenary/tugtainer)（自动更新执行引擎）与 [Vigil](https://github.com/jingyuan9527/vigil)（双模式检测与两级通知）的设计语义，全新实现。
 
-> 本仓库为 M1-Lite 落地版本（对应《VigilTainer容器守望者产品需求方案》P0 范围 + Compose 专题 partial 策略）。
+> 本仓库为 M1-Lite 落地版本（对应《容器守望者产品需求方案》P0 范围 + Compose 专题 partial 策略）。
 
 ## 功能（已实现并验证）
 
@@ -47,26 +47,26 @@ python run.py
 
 ## Docker 部署
 
-镜像已发布至 Docker Hub：[learycn/vigiltainer](https://hub.docker.com/r/learycn/vigiltainer)，由 GitHub Actions 自动构建推送：推送 `main` → 重建 `latest`；推送 `v*` 版本 tag（如 `v1.0.0`）→ 生成 `1.0.0` / `1.0` / `latest` 三个镜像标签。
+镜像已发布至 Docker Hub：[learycn/containerup](https://hub.docker.com/r/learycn/containerup)，由 GitHub Actions 自动构建推送：推送 `main` → 重建 `latest`；推送 `v*` 版本 tag（如 `v1.1.1`）→ 生成 `1.1.1` / `1.1` / `latest` 三个镜像标签。
 
 ```bash
 docker run -d \
-  --name vigiltainer \
+  --name containerup \
   -p 9412:9412 \
   -v vigiltainer-data:/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --restart unless-stopped \
-  learycn/vigiltainer:latest
+  learycn/containerup:latest
 ```
 
 或使用 docker compose：
 
 ```yaml
 services:
-  vigiltainer:
-    image: learycn/vigiltainer:latest
+  containerup:
+    image: learycn/containerup:latest
     pull_policy: always
-    container_name: vigiltainer
+    container_name: containerup
     ports:
       - "9412:9412"
     volumes:
@@ -124,7 +124,7 @@ python verify_e2e.py
 ## 目录结构
 
 ```
-vigiltainer/
+containerup/
 ├── backend/
 │   ├── config.py      # 配置（env/_FILE secrets）
 │   ├── db.py          # SQLite（WAL + 线程锁）

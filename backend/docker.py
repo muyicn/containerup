@@ -22,8 +22,8 @@ class DockerError(RuntimeError):
     pass
 
 
-# 平台托管标记：容器显式打上 dev.vigiltainer.managed=false 时，扫描跳过该容器
-MANAGED_LABEL = "dev.vigiltainer.managed"
+# 平台托管标记：容器显式打上 dev.containerup.managed=false 时，扫描跳过该容器
+MANAGED_LABEL = "dev.containerup.managed"
 
 
 def _fake_digest(spec: str) -> str:

@@ -41,13 +41,13 @@ jobs:
           docker push -q 127.0.0.1:5000/e2e-app:1.0.0
           docker push -q 127.0.0.1:5000/e2e-db:v1
 
-      - name: Build vigiltainer image (current commit)
+      - name: Build containerup image (current commit)
         run: docker build -t vt-e2e:local .
 
-      - name: Start vigiltainer (host network + real docker.sock, same as NAS compose deployment)
+      - name: Start containerup (host network + real docker.sock, same as NAS compose deployment)
         run: |
           docker run -d --name vt-e2e --network host \
-            --label dev.vigiltainer.managed=false \
+            --label dev.containerup.managed=false \
             -e VT_INSECURE_REGISTRIES=127.0.0.1:5000 \
             -e VT_DB_PATH=/data/e2e.db \
             -v vt-e2e-data:/data \
