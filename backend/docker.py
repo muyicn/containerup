@@ -72,11 +72,20 @@ class LocalDockerClient:
         state = data.get("State") or {}
         health = (state.get("Health") or {}).get("Status", "none")
         image_spec = (data.get("Config") or {}).get("Image", "")
-        repo_digests = data.get("RepoDigests") or []
+        full_image_id = data.get("Image") or ""
+        image_id = full_image_id[:71] or _fake_digest(image_spec)
+        # RepoDigests 是镜像属性（不在容器 inspect 里），需额外查 image inspect
+        repo_digests: list[str] = []
+        if full_image_id:
+            try:
+                img_raw = self._run("image", "inspect", full_image_id, "--format", "{{json .RepoDigests}}")
+                repo_digests = json.loads(img_raw) if img_raw.strip() else []
+            except DockerError:
+                pass
         return {
             "name": (data.get("Name") or "").lstrip("/"),
             "image": image_spec,
-            "image_id": (data.get("Image") or "")[:71] or _fake_digest(image_spec),
+            "image_id": image_id,
             # manifest 摘要（pull 时记录）：与 registry 检测同口径，用于更新对比；
             # image_id 是 config digest，仅用于回退定向重建，两者不可混用
             "repo_digest": repo_digests[0].split("@")[-1] if repo_digests else "",
