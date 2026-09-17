@@ -245,6 +245,9 @@ def main() -> int:
         check("E9 回退后自动关闭更新开关", False)
         check("E9 回退后容器运行", False)
     else:
+        # 回退依赖本地镜像（定向重建语义）；真实环境镜像可能被清理，按 digest 重新拉取
+        r = sh(f"docker pull {REG}/e2e-app@{target['digest']}")
+        check("E9 按 digest 重新拉取历史镜像", r.returncode == 0, r.stderr[-120:])
         st, body = c.req("POST", "/api/containers/e2e-web/rollback", {"digest": target["digest"]})
         check("E9 指定版本回退成功", st == 200 and body.get("status") == "ok", str(body))
         check("E9 回退后自动关闭更新开关", api.get_container("e2e-web").get("update_enabled") == 0)
@@ -260,6 +263,7 @@ def main() -> int:
 
     # ---------- E11 watch 哨兵 ----------
     push_app("2.0.0", "watch-baseline")  # pin watch 的基线 tag 必须真实存在，否则检查 404
+    push_watch("v1", "watch-seed")       # digest watch 同理：仓库与 tag 必须存在才能建基线
     st, _ = c.req("POST", "/api/watches", {"reference": f"{REG}/e2e-watch:v1"})
     check("E11 添加 digest watch", st == 200)
     st, _ = c.req("POST", "/api/watches", {"reference": f"{REG}/e2e-app:2.0.0"})
@@ -298,12 +302,17 @@ def main() -> int:
     time.sleep(1)
     api.scan()
     check("E14 前置：恢复跟踪并标记更新", api.get_container("e2e-db").get("update_available") == 1)
-    jobs_before = len(c.req("GET", "/api/jobs")[1])
+    jobs_before = max((j.get("id", 0) for j in c.req("GET", "/api/jobs")[1]), default=0)
     api.settings({"scan_interval_sec": "3"})
-    time.sleep(15)
-    st, jobs = c.req("GET", "/api/jobs")
-    auto_jobs = [j for j in jobs if j.get("status") == "done"][jobs_before:] if len(jobs) > jobs_before else []
-    check("E14 调度器自动执行更新任务", bool(auto_jobs), f"jobs {jobs_before} -> {len(jobs)}")
+    auto_jobs = []
+    deadline = time.time() + 45
+    while time.time() < deadline:
+        time.sleep(3)
+        st, jobs = c.req("GET", "/api/jobs")
+        auto_jobs = [j for j in jobs if j.get("id", 0) > jobs_before and j.get("status") == "done"]
+        if auto_jobs:
+            break
+    check("E14 调度器自动执行更新任务", bool(auto_jobs), f"last job: {str(jobs[:1])[:160]}")
     auto_hit = any(
         x.get("name") == "e2e-db" and x.get("result") == "updated"
         for j in auto_jobs for x in (j.get("result") or {}).get("containers", [])
