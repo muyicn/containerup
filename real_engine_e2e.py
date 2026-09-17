@@ -52,7 +52,8 @@ class Client:
         self.cookie = ""
 
     def req(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict | str]:
-        conn = http.client.HTTPConnection(self.host, self.port, timeout=20)
+        # 更新类请求含健康门控等待 + 自动回滚 + 回滚后等待，服务端可达 60s+，放宽客户端超时
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=90)
         headers = {"Content-Type": "application/json"}
         if self.cookie:
             headers["Cookie"] = self.cookie
