@@ -49,6 +49,7 @@ async function doScan(force) {
     if (r.status === 'ok') {
       toast(`扫描完成：检查 ${r.checked} · 新通知 ${r.events} · 错误 ${r.errors}`)
       log(`扫描完成：checked=${r.checked} events=${r.events} errors=${r.errors} 用时 ${r.duration_ms}ms${r.force ? '（强制）' : ''}`, r.errors ? 'warn' : 'ok')
+      for (const e of r.errors_detail || []) log(`检测失败 ${e.name}：${e.error}`, 'err')
     } else {
       toast('扫描进行中，请稍候', true)
       log('扫描互斥：已有扫描在运行', 'warn')
@@ -159,6 +160,10 @@ defineExpose({ load })
           </div>
           <div class="px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 text-slate-500">
             {{ scanSummaryText() }}
+            <div v-for="e in s.latest_scan?.summary?.errors_detail || []" :key="e.name"
+                 class="mt-1 text-[11px] leading-snug text-rose-500 dark:text-rose-400 break-all">
+              检测失败 {{ e.name }}：{{ e.error }}
+            </div>
           </div>
         </div>
       </div>

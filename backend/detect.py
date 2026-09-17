@@ -252,9 +252,10 @@ def scan(docker_client: Any, force: bool = False) -> dict[str, Any]:
             rows = db.query("SELECT * FROM containers")
             all_events: list[dict[str, Any]] = []
             checked = errors = 0
+            error_details: list[dict[str, str]] = []
             targets = [r for r in rows if r["check_enabled"] and not r["ignored"]]
 
-            def _do(row: dict[str, Any]) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+            def _do(row: dict[str, Any]) -> tuple[Optional[dict[str, Any]], Optional[tuple[str, str]]]:
                 try:
                     out = _check_target(
                         client,
@@ -268,7 +269,7 @@ def scan(docker_client: Any, force: bool = False) -> dict[str, Any]:
                     return out, None
                 except Exception as e:  # 单容器失败不阻断扫描
                     logger.warning("check failed for %s: %s", row["name"], e)
-                    return None, row["name"]
+                    return None, (row["name"], str(e)[:200])
 
             # 并发检测：瓶颈是 registry 网络往返，线程池 8 并发把逐容器串行等待压缩为批次
             workers = max(1, min(8, len(targets)))
@@ -276,6 +277,7 @@ def scan(docker_client: Any, force: bool = False) -> dict[str, Any]:
                 for out, failed in ex.map(_do, targets):
                     if failed:
                         errors += 1
+                        error_details.append({"name": failed[0], "error": failed[1]})
                     else:
                         checked += 1
                         all_events.extend(out["events"])
@@ -333,6 +335,7 @@ def scan(docker_client: Any, force: bool = False) -> dict[str, Any]:
             except Exception as e:
                 errors += 1
                 logger.warning("watch check failed for %s: %s", w["reference"], e)
+                error_details.append({"name": w["reference"], "error": str(e)[:200]})
 
         # 自动已读 + 已读裁剪 + 渠道投递
         containers_rows = {r["name"]: r for r in db.query("SELECT * FROM containers")}
@@ -346,6 +349,7 @@ def scan(docker_client: Any, force: bool = False) -> dict[str, Any]:
         summary = {
             "checked": checked,
             "errors": errors,
+            "errors_detail": error_details,  # 失败容器/引用 + 原因，UI 与扫描历史可见
             "events": pushed,  # 实际产生的新通知数（防抖后）
             "auto_read": marked,
             "duration_ms": int((time.time() - started) * 1000),
