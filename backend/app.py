@@ -335,12 +335,12 @@ def update_container(name: str, user: str = Depends(require_auth)) -> dict[str, 
     row = db.query_one("SELECT * FROM containers WHERE name=?", (name,))
     if not row:
         raise HTTPException(status_code=404, detail="not found")
-    return engine.run_update(DOCKER, names=[name])
+    return engine.run_update(DOCKER, names=[name], health_wait_sec=_health_wait())
 
 
 @app.post("/api/update")
 def update_all(manual: bool = True, user: str = Depends(require_auth)) -> dict[str, Any]:
-    return engine.run_update(DOCKER, manual=manual)
+    return engine.run_update(DOCKER, manual=manual, health_wait_sec=_health_wait())
 
 
 @app.get("/api/containers/{name}/versions")
@@ -370,7 +370,7 @@ def container_versions(name: str, user: str = Depends(require_auth)) -> dict[str
 def rollback_container(name: str, body: dict = Body(default={}), user: str = Depends(require_auth)) -> dict[str, Any]:
     """手动回退到台账中的上一个（或指定 digest）版本。"""
     try:
-        return engine.run_rollback(DOCKER, name, digest=(body or {}).get("digest"))
+        return engine.run_rollback(DOCKER, name, digest=(body or {}).get("digest"), health_wait_sec=_health_wait())
     except DockerError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -508,12 +508,20 @@ def list_jobs(user: str = Depends(require_auth)) -> list[dict]:
 
 # ---------- 设置 ----------
 
-_ALLOWED_SETTINGS = {"delay_update_sec", "scan_interval_sec", "registry_mirror", "demo_failure", "public_base_url"}
+_ALLOWED_SETTINGS = {"delay_update_sec", "scan_interval_sec", "registry_mirror", "demo_failure", "public_base_url", "health_wait_sec"}
+
+
+def _health_wait() -> int:
+    """健康门控等待秒数（settings 可配，0=单次快查 + starting 宽限）。"""
+    try:
+        return max(0, int(db.setting_get("health_wait_sec", "0") or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 @app.get("/api/settings")
 def get_settings(user: str = Depends(require_auth)) -> dict[str, Any]:
-    rows = db.query("SELECT key, value FROM settings WHERE key IN ('delay_update_sec','scan_interval_sec','registry_mirror','public_base_url')")
+    rows = db.query("SELECT key, value FROM settings WHERE key IN ('delay_update_sec','scan_interval_sec','registry_mirror','public_base_url','health_wait_sec')")
     return {r["key"]: r["value"] for r in rows}
 
 

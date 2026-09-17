@@ -358,11 +358,27 @@ class UpdateEngine:
 
     def _wait_healthy(self, name: str) -> bool:
         if self.health_wait_sec <= 0:
-            # 无健康检查等待：直接查一次
+            # 无健康检查等待：直接查一次。真实引擎上，镜像内嵌 HEALTHCHECK 的新容器
+            # 短暂处于 starting——需要短暂宽限窗口等出 healthy/unhealthy，避免误判回滚
             try:
-                return self.docker.inspect(name).get("health") in ("healthy", "none")
+                h = self.docker.inspect(name).get("health")
             except DockerError:
                 return False
+            if h in ("healthy", "none"):
+                return True
+            if h == "starting":
+                deadline = time.time() + 10
+                while time.time() < deadline:
+                    time.sleep(0.5)
+                    try:
+                        h = self.docker.inspect(name).get("health")
+                    except DockerError:
+                        return False
+                    if h in ("healthy", "none"):
+                        return True
+                    if h == "unhealthy":
+                        return False
+            return h == "healthy"
         deadline = time.time() + self.health_wait_sec
         while time.time() < deadline:
             try:

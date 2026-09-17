@@ -1,0 +1,6 @@
+# 真实引擎 E2E 测试镜像（模拟新版本启动失败）：HEALTHCHECK 必失败 → 驱动健康门控自动回滚
+FROM alpine:3.20
+ARG MARK=bad
+RUN mkdir -p /opt && echo "$MARK" > /opt/mark
+HEALTHCHECK --interval=2s --timeout=1s --start-period=1s --retries=2 CMD /bin/sh -c "exit 1"
+CMD ["sleep", "3600"]

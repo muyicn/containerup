@@ -1,0 +1,80 @@
+name: Real Engine E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'e2e/**'
+      - 'real_engine_e2e.py'
+      - '.github/workflows/real-engine-e2e.yml'
+
+jobs:
+  real-engine-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Allow insecure local registry (127.0.0.1:5000)
+        run: |
+          sudo tee /etc/docker/daemon.json > /dev/null <<'EOF'
+          {"insecure-registries":["127.0.0.1:5000"]}
+          EOF
+          sudo systemctl restart docker
+
+      - name: Start upstream registry & push seed images
+        run: |
+          docker run -d --name e2e-registry -p 127.0.0.1:5000:5000 registry:2
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:5000/v2/ >/dev/null 2>&1 && break
+            sleep 1
+          done
+          docker build -q -t 127.0.0.1:5000/e2e-app:v1   --build-arg MARK=seed1 -f e2e/Dockerfile.app e2e/
+          docker build -q -t 127.0.0.1:5000/e2e-app:pin  --build-arg MARK=seed1 -f e2e/Dockerfile.app e2e/
+          docker build -q -t 127.0.0.1:5000/e2e-app:1.0.0 --build-arg MARK=seed1 -f e2e/Dockerfile.app e2e/
+          docker build -q -t 127.0.0.1:5000/e2e-db:v1    --build-arg MARK=seed1 -f e2e/Dockerfile.db e2e/
+          docker push -q 127.0.0.1:5000/e2e-app:v1
+          docker push -q 127.0.0.1:5000/e2e-app:pin
+          docker push -q 127.0.0.1:5000/e2e-app:1.0.0
+          docker push -q 127.0.0.1:5000/e2e-db:v1
+
+      - name: Build vigiltainer image (current commit)
+        run: docker build -t vt-e2e:local .
+
+      - name: Start vigiltainer (host network + real docker.sock, same as NAS compose deployment)
+        run: |
+          docker run -d --name vt-e2e --network host \
+            -e VT_INSECURE_REGISTRIES=127.0.0.1:5000 \
+            -e VT_DB_PATH=/data/e2e.db \
+            -v vt-e2e-data:/data \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            vt-e2e:local
+          ok=""
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:9412/api/public/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then echo "service not healthy"; docker logs vt-e2e; exit 1; fi
+          curl -fsS http://127.0.0.1:9412/api/public/health
+
+      - name: Run real engine E2E (all scenarios)
+        run: python3 real_engine_e2e.py
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== vt-e2e logs ==="
+          docker logs vt-e2e 2>&1 | tail -150 || true
+          echo "=== containers ==="
+          docker ps -a || true
+          echo "=== recent registry catalog ==="
+          curl -s http://127.0.0.1:5000/v2/_catalog || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f e2e-web e2e-db e2e-pin e2e-prot vt-e2e e2e-registry || true
+          docker volume rm vt-e2e-data || true
