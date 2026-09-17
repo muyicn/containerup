@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'f1edbf12-2d93-400b-a854-d8508bfcff68'
-  PropagateID: 'f1edbf12-2d93-400b-a854-d8508bfcff68'
-  ReservedCode1: 'ab019e2f-86e2-4533-a6f0-e55fb67ff5a2'
-  ReservedCode2: 'ab019e2f-86e2-4533-a6f0-e55fb67ff5a2'
+  ProduceID: '552f47c0-0435-43ac-85a0-82eba0b43227'
+  PropagateID: '552f47c0-0435-43ac-85a0-82eba0b43227'
+  ReservedCode1: 'cbee5f6d-7f4a-4a10-ad2e-8c00eaa5b758'
+  ReservedCode2: 'cbee5f6d-7f4a-4a10-ad2e-8c00eaa5b758'
 ---
 
 # 容器守望者
@@ -45,6 +45,40 @@ python run.py
 
 首次部署：浏览器打开后按引导设置管理员密码（或 `VT_DEMO_ADMIN_PASSWORD` 预置）。
 
+## Docker 部署
+
+镜像已发布至 Docker Hub：[learycn/vigiltainer](https://hub.docker.com/r/learycn/vigiltainer)，由 GitHub Actions 自动构建推送：推送 `main` → 重建 `latest`；推送 `v*` 版本 tag（如 `v1.0.0`）→ 生成 `1.0.0` / `1.0` / `latest` 三个镜像标签。
+
+```bash
+docker run -d \
+  --name vigiltainer \
+  -p 9412:9412 \
+  -v vigiltainer-data:/data \
+  --restart unless-stopped \
+  learycn/vigiltainer:latest
+```
+
+或使用 docker compose：
+
+```yaml
+services:
+  vigiltainer:
+    image: learycn/vigiltainer:latest
+    container_name: vigiltainer
+    ports:
+      - "9412:9412"
+    volumes:
+      - vigiltainer-data:/data
+    restart: unless-stopped
+
+volumes:
+  vigiltainer-data:
+```
+
+- 数据库与 JWT 密钥均持久化于 `/data` 卷，升级镜像不丢配置；容器内置 HEALTHCHECK（探测 `/api/public/health`）
+- **当前镜像未内置 Docker CLI**：容器化运行时平台自身自动降级为无引擎模式（界面会标注），以下能力开箱可用——远端镜像监控（哨兵不依赖本机 Docker）、通知渠道配置与连通性测试、演示模式（追加环境变量 `VT_DEMO_MODE=1` 体验完整更新/回滚剧本）
+- **管理宿主机真实容器**：需镜像内置 Docker CLI 并挂载 `/var/run/docker.sock`，当前镜像暂未内置，请用上方源码方式部署（`python run.py`）
+
 ## 自动更新什么时候执行？
 
 四种触发路径（对应 PRD 5.3）：
@@ -77,7 +111,6 @@ python verify_e2e.py
 | `VT_LOGIN_MAX_FAILS` / `VT_LOGIN_LOCK_SEC` | `5` / `900` | 登录限流 |
 | `VT_DELAY_UPDATE_SEC` | `0` | 全局发布延迟（新镜像观察期） |
 | `VT_SCAN_INTERVAL_SEC` | `0` | 自动检测间隔基线（设置页可覆盖，热生效；0=仅手动） |
-| `VT_ROLLBACK_HOLD_SEC` | `1800` | 手动回退后自动更新保护期（设置页可覆盖；0=不暂停） |
 | `VT_MERGE_WAIT_SEC` | `0` | 项目合并等待窗口（消除组内异步更新中间态） |
 | `VT_REGISTRY_MIRROR` | 空 | 注册表镜像主机 |
 | `VT_INSECURE_REGISTRIES` | 空 | http registry 白名单（逗号分隔） |
