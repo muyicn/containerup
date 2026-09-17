@@ -21,6 +21,10 @@ class DockerError(RuntimeError):
     pass
 
 
+# 平台托管标记：容器显式打上 dev.vigiltainer.managed=false 时，扫描跳过该容器
+MANAGED_LABEL = "dev.vigiltainer.managed"
+
+
 def _fake_digest(spec: str) -> str:
     """Mock 摘要：对引用做稳定哈希（模拟 sha256 digest）。"""
     return "sha256:" + hashlib.sha256(spec.encode()).hexdigest()
@@ -42,10 +46,10 @@ class LocalDockerClient:
         return out.stdout
 
     def list_containers(self) -> list[dict[str, Any]]:
-        raw = self._run(
-            "ps", "-a", "--format", "{{json .}}",
-            "--filter", "label=dev.vigiltainer.managed!=false",
-        )
+        # 注意：不能用 `--filter label=k!=v`——Docker 的语义是"必须拥有 k 且值不同"，
+        # 没有该 label 的普通容器会被整体排除（曾导致真实引擎扫描"检查 0"）。
+        # 列出全部容器后在应用侧过滤：仅排除显式 managed=false 的容器。
+        raw = self._run("ps", "-a", "--format", "{{json .}}")
         out = []
         for line in raw.splitlines():
             if not line.strip():
@@ -54,7 +58,10 @@ class LocalDockerClient:
             name = c.get("Names", "")
             if not name:
                 continue
-            out.append(self.inspect(name))
+            info = self.inspect(name)
+            if (info.get("labels") or {}).get(MANAGED_LABEL, "").strip().lower() == "false":
+                continue
+            out.append(info)
         return out
 
     def inspect(self, name: str) -> dict[str, Any]:

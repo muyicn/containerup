@@ -238,11 +238,15 @@ def main() -> int:
     st, v = c.req("GET", "/api/containers/e2e-web/versions")
     versions = v.get("versions", [])
     target = next((x for x in reversed(versions) if x["digest"] and not x["is_current"]), None)
-    check("E9 版本列表可选历史版本", target is not None, str(v)[:200])
-    st, body = c.req("POST", "/api/containers/e2e-web/rollback", {"digest": target["digest"]})
-    check("E9 指定版本回退成功", st == 200 and body.get("status") == "ok", str(body))
-    check("E9 回退后自动关闭更新开关", api.get_container("e2e-web").get("update_enabled") == 0)
-    check("E9 回退后容器运行", dinspect("e2e-web").get("State", {}).get("Running") is True)
+    if not check("E9 版本列表可选历史版本", target is not None, str(v)[:200]):
+        check("E9 指定版本回退成功", False, "skipped: no target version")
+        check("E9 回退后自动关闭更新开关", False)
+        check("E9 回退后容器运行", False)
+    else:
+        st, body = c.req("POST", "/api/containers/e2e-web/rollback", {"digest": target["digest"]})
+        check("E9 指定版本回退成功", st == 200 and body.get("status") == "ok", str(body))
+        check("E9 回退后自动关闭更新开关", api.get_container("e2e-web").get("update_enabled") == 0)
+        check("E9 回退后容器运行", dinspect("e2e-web").get("State", {}).get("Running") is True)
 
     # ---------- E10 pin-watch 新版本 tag ----------
     push_app("1.1.0", "new-version")
