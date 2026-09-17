@@ -201,8 +201,10 @@ def main() -> int:
     # ---------- E5 digest-only 更新发现 ----------
     push_app("v1", "second-release")
     time.sleep(1)
-    api.scan()
-    check("E5 上游摘要变化 → 更新标记", api.get_container("e2e-web").get("update_available") == 1)
+    s5 = api.scan()
+    w5 = api.get_container("e2e-web")
+    check("E5 上游摘要变化 → 更新标记", w5.get("update_available") == 1,
+          f"scan={s5} | web local={w5.get('local_digest','')[:19]} remote={w5.get('remote_digest','')[:19]} avail={w5.get('update_available')}")
 
     # ---------- E6 compose 聚合通知 ----------
     push_db("v1", "second-release")
