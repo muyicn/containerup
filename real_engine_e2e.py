@@ -203,8 +203,10 @@ def main() -> int:
     time.sleep(1)
     s5 = api.scan()
     w5 = api.get_container("e2e-web")
+    ld = w5.get('local_digest') or '-'
+    rd = w5.get('remote_digest') or '-'
     check("E5 上游摘要变化 → 更新标记", w5.get("update_available") == 1,
-          f"scan={s5} | web local={w5.get('local_digest','')[:19]} remote={w5.get('remote_digest','')[:19]} avail={w5.get('update_available')}")
+          f"scan={s5} | web local={ld[:19]} remote={rd[:19]} avail={w5.get('update_available')} img={w5.get('image_spec','?')}")
 
     # ---------- E6 compose 聚合通知 ----------
     push_db("v1", "second-release")
