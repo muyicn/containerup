@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '552f47c0-0435-43ac-85a0-82eba0b43227'
-  PropagateID: '552f47c0-0435-43ac-85a0-82eba0b43227'
-  ReservedCode1: 'cbee5f6d-7f4a-4a10-ad2e-8c00eaa5b758'
-  ReservedCode2: 'cbee5f6d-7f4a-4a10-ad2e-8c00eaa5b758'
+  ProduceID: 'c0568191-b40e-4eb1-9fab-08b7ba195c97'
+  PropagateID: 'c0568191-b40e-4eb1-9fab-08b7ba195c97'
+  ReservedCode1: '2a9c8cbb-fa79-4f5e-a91e-6992ff94917e'
+  ReservedCode2: '2a9c8cbb-fa79-4f5e-a91e-6992ff94917e'
 ---
 
 # 容器守望者
@@ -54,6 +54,7 @@ docker run -d \
   --name vigiltainer \
   -p 9412:9412 \
   -v vigiltainer-data:/data \
+  -v /var/run/docker.sock:/var/run/docker.sock \
   --restart unless-stopped \
   learycn/vigiltainer:latest
 ```
@@ -69,15 +70,17 @@ services:
       - "9412:9412"
     volumes:
       - vigiltainer-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
 volumes:
   vigiltainer-data:
 ```
 
+- 镜像内置 Docker CLI（官方静态客户端）；运行时挂载 `/var/run/docker.sock` 后平台直接管理宿主机引擎，访问 `/api/public/health` 看到 `"docker_impl":"local"` 即接入成功（CI 已在真实引擎上冒烟验证该路径）；未挂载 sock 时自动降级为无引擎模式并在界面标注
 - 数据库与 JWT 密钥均持久化于 `/data` 卷，升级镜像不丢配置；容器内置 HEALTHCHECK（探测 `/api/public/health`）
-- **当前镜像未内置 Docker CLI**：容器化运行时平台自身自动降级为无引擎模式（界面会标注），以下能力开箱可用——远端镜像监控（哨兵不依赖本机 Docker）、通知渠道配置与连通性测试、演示模式（追加环境变量 `VT_DEMO_MODE=1` 体验完整更新/回滚剧本）
-- **管理宿主机真实容器**：需镜像内置 Docker CLI 并挂载 `/var/run/docker.sock`，当前镜像暂未内置，请用上方源码方式部署（`python run.py`）
+- 演示模式：追加环境变量 `VT_DEMO_MODE=1`（即使挂载了 sock 也优先走内存剧本，适合无侵入体验）
+- 安全提示：`docker.sock` 等同宿主机 Docker 的 root 级权限，请仅将服务暴露给可信网络
 
 ## 自动更新什么时候执行？
 
@@ -150,9 +153,8 @@ npm run build      # 构建产物到 frontend/dist（后端自动托管）
 
 ## 已知限制（诚实披露）
 
-1. **未在真实 Docker 引擎上验证**：开发环境无 Docker CLI/引擎，更新执行引擎经 `MockDockerClient`（内存模型）完成逻辑级端到端验证；`LocalDockerClient` 已实现（subprocess 调 docker CLI）但**未经真实引擎回归**——首次在真实环境部署时请先用非关键容器试点。
+1. **真实引擎验证范围有限**：CI 已在真实 Docker 引擎上完成 Local 引擎接入冒烟（sock 挂载 + CLI 探测 + 容器列表可见，`docker_impl=local`）；但**更新/重建/回滚等写操作未经真实引擎回归**（开发与 CI 均未执行真实更新），容器重建命令为简化参数集（env/cmd/restart/labels），复杂容器（挂载、网络别名、自定义端口映射）重建保真度有限，真实联调时需补齐 inspect→create 的全量配置映射——首次在真实环境部署时请先用非关键容器试点。
 2. M1-Lite 未含：多主机 Agent、Hooks、健康监控独立任务、prune、OIDC、Apprise 扩展渠道（见 PRD M2 范围）。
-3. LocalDockerClient 的 create 重建命令为简化参数集（env/cmd/restart/labels），复杂容器（挂载、网络别名、自定义端口映射）重建保真度有限，真实引擎联调时需补齐 inspect→create 的全量配置映射。
-4. 演示模式的 registry 状态为内存静态源，服务重启后回到初始摘要（持久化仅 DB 侧）；生产模式无此问题。
+3. 演示模式的 registry 状态为内存静态源，服务重启后回到初始摘要（持久化仅 DB 侧）；生产模式无此问题。
 
 > AI生成

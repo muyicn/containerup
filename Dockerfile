@@ -1,11 +1,19 @@
 # 容器守望者：一体化 Docker 容器更新守望平台
 # 数据持久化：挂载 /data（SQLite 数据库所在）
+# 管理宿主机容器：运行时挂载 /var/run/docker.sock
 FROM python:3.12-slim
 
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# 内置 Docker CLI（官方静态客户端，仅取 docker 一个文件；供平台探测/操控宿主机引擎）
+RUN python -c "import urllib.request; urllib.request.urlretrieve('https://download.docker.com/linux/static/stable/x86_64/docker-27.3.1.tgz', '/tmp/docker.tgz')" \
+    && tar -xzf /tmp/docker.tgz -C /tmp docker/docker \
+    && mv /tmp/docker/docker /usr/local/bin/docker \
+    && chmod +x /usr/local/bin/docker \
+    && rm -rf /tmp/docker /tmp/docker.tgz
 
 COPY run.py .
 COPY backend/ backend/

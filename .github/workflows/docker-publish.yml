@@ -35,6 +35,41 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
+      - name: Build (local load, for smoke test)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: vigiltainer:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test (real Docker engine)
+        run: |
+          docker run -d --name vt-smoke \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -p 9412:9412 \
+            vigiltainer:ci
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9412/api/public/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "service did not become healthy"; docker logs vt-smoke; exit 1
+          fi
+          echo "--- health ---"
+          curl -fsS http://127.0.0.1:9412/api/public/health
+          echo
+          echo "--- assert platform connected to real engine ---"
+          curl -fsS http://127.0.0.1:9412/api/public/health | grep -o '"docker_impl":"local"'
+          echo "--- docker CLI inside container ---"
+          docker exec vt-smoke docker version --format 'CLI {{.Client.Version}}'
+          echo "--- real engine visible from inside container ---"
+          docker exec vt-smoke docker ps --format '{{.Names}}' | grep -qx vt-smoke
+          echo "--- teardown ---"
+          docker rm -f vt-smoke
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
