@@ -176,14 +176,13 @@ class RegistryClient:
     def remote_digest(
         self, registry: str, repo: str, tag: str, local_digest: Optional[str]
     ) -> Optional[str]:
-        """HEAD manifest，支持 304 协商与 Bearer token 流。返回当前摘要或 None。"""
+        """HEAD manifest，支持 Bearer token 流。返回当前远端摘要或 None。"""
         insecure = _is_insecure(registry)
         base = self._base_url(registry, insecure)
         url = f"{base}/v2/{repo}/manifests/{tag}"
         headers = {"Accept": MANIFEST_ACCEPT}
-        if local_digest:
-            local_clean = local_digest.split("@")[-1]
-            headers["If-None-Match"] = local_clean
+        # 不使用 If-None-Match 304 协商：不同 registry 实现对 ETag 格式处理不一致，
+        # 可能导致旧 digest 误命中 304 而漏检更新；始终 GET 完整摘要确保正确性
         client = self._client()
         status, resp_headers = self._do_head(client, url, headers)
         if status in (401, 403):
@@ -192,7 +191,7 @@ class RegistryClient:
                 headers["Authorization"] = f"Bearer {self._bearer_token(client, auth_header, repo, insecure)}"
             status, resp_headers = self._do_head(client, url, headers)
         if status == 304:
-            return local_digest
+            return local_digest  # 不应到达（未发 If-None-Match），保留安全回退
         if status != 200:
             raise RuntimeError(f"registry {registry} returned {status} for {repo}:{tag}")
         return (
