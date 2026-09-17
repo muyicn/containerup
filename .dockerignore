@@ -1,0 +1,52 @@
+# 版本管理
+.git
+.gitignore
+
+# 运行数据与敏感信息
+vigiltainer.db
+vigiltainer.db-wal
+vigiltainer.db-shm
+*.sqlite
+*.sqlite3
+.env
+.env.*
+*.key
+*.pem
+
+# 调试与日志
+*.log
+logs/
+debug/
+screenshots/
+.temp/
+
+# Python 缓存
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# 前端开发文件（镜像只需构建产物 dist）
+frontend/node_modules/
+frontend/src/
+frontend/public/
+frontend/index.html
+frontend/package.json
+frontend/package-lock.json
+frontend/postcss.config.js
+frontend/tailwind.config.js
+frontend/vite.config.js
+frontend/.vscode/
+frontend/.gitignore
+frontend/README.md
+
+# 测试（镜像运行不需要）
+tests/
+verify_e2e.py
+.pytest_cache/
+
+# 文档与系统
+README.md
+*.md
+Thumbs.db
+Desktop.ini
