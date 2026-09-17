@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'c0568191-b40e-4eb1-9fab-08b7ba195c97'
-  PropagateID: 'c0568191-b40e-4eb1-9fab-08b7ba195c97'
-  ReservedCode1: '2a9c8cbb-fa79-4f5e-a91e-6992ff94917e'
-  ReservedCode2: '2a9c8cbb-fa79-4f5e-a91e-6992ff94917e'
+  ProduceID: '91e809e2-7070-4721-859f-59ee0343616f'
+  PropagateID: '91e809e2-7070-4721-859f-59ee0343616f'
+  ReservedCode1: 'c731c185-aba1-4712-a68f-fc25bff97443'
+  ReservedCode2: 'c731c185-aba1-4712-a68f-fc25bff97443'
 ---
 
 # 容器守望者
@@ -65,6 +65,7 @@ docker run -d \
 services:
   vigiltainer:
     image: learycn/vigiltainer:latest
+    pull_policy: always
     container_name: vigiltainer
     ports:
       - "9412:9412"
@@ -76,6 +77,8 @@ services:
 volumes:
   vigiltainer-data:
 ```
+
+> `pull_policy: always` 防止 `latest` 被本地旧缓存卡住（Docker 不会自动重拉已存在的 `docker compose up`）；旧版部署请先 `docker compose pull && docker compose up -d`。
 
 - 镜像内置 Docker CLI（官方静态客户端）；运行时挂载 `/var/run/docker.sock` 后平台直接管理宿主机引擎，访问 `/api/public/health` 看到 `"docker_impl":"local"` 即接入成功（CI 已在真实引擎上冒烟验证该路径）；未挂载 sock 时自动降级为无引擎模式并在界面标注
 - 数据库与 JWT 密钥均持久化于 `/data` 卷，升级镜像不丢配置；容器内置 HEALTHCHECK（探测 `/api/public/health`）

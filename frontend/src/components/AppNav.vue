@@ -74,7 +74,7 @@ function pick(item) {
       <div v-if="store.demoMode || store.mockFallback"
         class="mx-1 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-500/10 border border-amber-200/60 dark:border-amber-500/20
                text-[11px] font-semibold text-amber-600 dark:text-amber-400 text-center">
-        {{ store.demoMode ? 'DEMO 模式 · 内存 Mock' : '无 Docker 引擎 · Mock 模式' }}
+        {{ store.demoMode ? 'DEMO 模式 · 内存 Mock' : 'Docker 未接入 · Mock 模式' }}
       </div>
       <div class="mx-1 pt-2 border-t border-slate-200/70 dark:border-slate-700/60 grid grid-cols-2 gap-2">
         <button @click="logout"

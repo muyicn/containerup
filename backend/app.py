@@ -4,7 +4,6 @@
 演示模式：DEMO_MODE=1 时种子 compose 三容器场景（PRD 5.2 复现）。
 """
 import logging
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -22,7 +21,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app")
 
 DOCKER = make_docker_client()
-MOCK_FALLBACK_NOTICE = not os.path.exists("/var/run/docker.sock") and not CONFIG.DEMO_MODE
+# 引擎降级提示以前端读取 /api/public/health 的 docker_impl 为准（侧边栏徽标），
+# 此处不再维护独立的 sock 文件存在性判断（与引擎选择条件不一致，会产生静默降级盲区）
 
 
 @asynccontextmanager

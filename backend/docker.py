@@ -10,6 +10,7 @@
 """
 import hashlib
 import json
+import logging
 import subprocess
 from typing import Any, Optional
 
@@ -234,7 +235,13 @@ def make_docker_client():
 
     if shutil.which(CONFIG.DOCKER_BIN):
         return LocalDockerClient()
-    # 无 Docker 环境自动降级 Mock（并在 UI/日志标注）
+    # 无 Docker CLI 自动降级 Mock——必须显式告警，杜绝静默降级（用户侧表现为"扫描检查 0"）
+    logging.getLogger("docker").warning(
+        "未找到 docker CLI（VT_DOCKER_BIN=%s），已降级为内存 Mock 客户端，扫描将看不到任何容器。"
+        "修复：容器部署请使用内置 CLI 的官方镜像并挂载 /var/run/docker.sock（重新 docker compose pull）；"
+        "源码部署请安装 Docker CLI 或设置 VT_DOCKER_BIN 指向可用二进制。",
+        CONFIG.DOCKER_BIN,
+    )
     return MockDockerClient()
 
 
