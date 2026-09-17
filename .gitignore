@@ -1,0 +1,44 @@
+# 运行时数据（SQLite：账号密码哈希 / JWT 密钥 / 渠道 webhook / 通知任务历史）
+vigiltainer.db
+vigiltainer.db-wal
+vigiltainer.db-shm
+*.sqlite
+*.sqlite3
+
+# 调试与运行日志
+*.log
+logs/
+debug/
+
+# 调试截图（本地留存，不上传）
+screenshots/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# 前端依赖
+frontend/node_modules/
+
+# 环境变量与密钥（防未来误放）
+.env
+.env.*
+*.env
+*_FILE
+*.pem
+*.key
+
+# 编辑器
+.vscode/
+.idea/
+
+# 中间产物 / 临时文件
+.temp/
+*.bak
+*.tmp
+
+# 系统
+Thumbs.db
+Desktop.ini

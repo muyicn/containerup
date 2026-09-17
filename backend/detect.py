@@ -1,0 +1,342 @@
+"""扫描编排：采集容器 → 双模式检测 → 两级通知（防抖/聚合/自动已读）→ 落库。
+
+对齐 PRD 3.1 / 3.4 / 4.1：
+- 首检基线：本地无摘要记录时只建基线不告警（继承 Vigil 语义）
+- update 强提醒（摘要变化，同摘要一次）+ new-tag 弱提醒（Pin-Watch 更高版本 tag，每 tag 一次）
+- 发现通知按 compose 项目聚合为一条（PRD 5.4）；独立容器单独一条
+- 扫描互斥：同一时刻仅允许一次扫描
+"""
+import hashlib
+import logging
+import threading
+import time
+from typing import Any, Optional
+
+from backend import db, notify
+from backend.config import CONFIG
+from backend.engine import (
+    COMPOSE_PROJECT_LABEL,
+    COMPOSE_SERVICE_LABEL,
+    PROTECTED_LABEL,
+    get_compose_id,
+    get_service_name,
+)
+from backend.registry import RegistryClient, RegistryResult, detect_mode, parse_image_spec
+
+logger = logging.getLogger("detect")
+
+_SCAN_LOCK = threading.Lock()
+
+
+class StaticRegistrySource:
+    """静态注入的 registry 检测源（演示模式/测试用）。
+
+    specs: {image_spec: {"digest": str, "tags": [str]}}
+    fallback=True 时未知规格合成确定性摘要（演示模式：任意 watch 可建基线）。
+    """
+
+    def __init__(self, specs: dict[str, dict[str, Any]], fallback: bool = False):
+        self.specs = specs
+        self.fallback = fallback
+
+    def check(self, spec: str, local_digest: Optional[str], mode: str) -> RegistryResult:
+        info = self.specs.get(spec)
+        if info is None and self.fallback:
+            from backend.docker import _fake_digest
+
+            _, _, tag = parse_image_spec(spec)
+            info = {"digest": _fake_digest(spec), "tags": [tag]}
+        if not info:
+            raise RuntimeError(f"mock registry: unknown spec {spec}")
+        digest = info["digest"]
+        tags = list(info.get("tags", []))
+        from backend.registry import newer_version_tags
+
+        _, _, tag = parse_image_spec(spec)
+        return RegistryResult(digest=digest, newer_tags=newer_version_tags(tag, tags))
+
+
+def make_registry_client() -> Any:
+    """演示模式 → 静态源（未知规格 fallback 建基线）；否则真实 HTTP 客户端。"""
+    if CONFIG.DEMO_MODE:
+        from backend.demo import DEMO_REGISTRY_SPECS
+
+        return StaticRegistrySource(DEMO_REGISTRY_SPECS, fallback=True)
+    return RegistryClient()
+
+
+def _sync_containers(docker_client: Any) -> dict[str, dict[str, Any]]:
+    """容器采集 upsert：运行时快照 → containers 表行（保留策略列）。"""
+    runtime = docker_client.list_containers()
+    runtime_names = set()
+    for c in runtime:
+        name = c["name"]
+        runtime_names.add(name)
+        labels = c.get("labels") or {}
+        compose_id = get_compose_id(c) or ""
+        service = get_service_name(c) or ""
+        protected = 1 if labels.get(PROTECTED_LABEL, "").lower() == "true" else 0
+        image_spec = c.get("image", "")
+        local_digest = c.get("image_id") or ""
+        with db.tx() as conn:
+            conn.execute(
+                """
+                INSERT INTO containers(name, image_spec, compose_id, service, mode,
+                    check_enabled, update_enabled, protected, local_digest)
+                VALUES(?,?,?,?,?,1,1,?,NULL)
+                ON CONFLICT(name) DO UPDATE SET
+                    image_spec=excluded.image_spec,
+                    compose_id=excluded.compose_id,
+                    service=excluded.service,
+                    protected=excluded.protected
+                """,
+                (name, image_spec, compose_id, service, "auto", protected),
+            )
+    # 已消失的容器：清 update_available（继承上游 v1.41 修复语义）
+    rows = db.query("SELECT name FROM containers")
+    for r in rows:
+        if r["name"] not in runtime_names:
+            with db.tx() as conn:
+                conn.execute(
+                    "UPDATE containers SET update_available=0 WHERE name=?", (r["name"],)
+                )
+    return {c["name"]: c for c in runtime}
+
+
+def _check_target(
+    client: Any,
+    target: str,
+    image_spec: str,
+    row: dict[str, Any],
+    mode_override: str,
+    local_digest: Optional[str],
+    force: bool,
+) -> dict[str, Any]:
+    """检查单个目标，返回事件明细。不直接发通知（由调用方聚合）。
+
+    Vigil 语义：首巡把现存 tag 记为已见基线不告警；
+    后续仅对"基线之外新出现"的更高版本 tag 发 new-tag（每 tag 一次）；
+    强制扫描无视基线与去重重播。
+    """
+    _, _, tag = parse_image_spec(image_spec)
+    mode = detect_mode(tag, mode_override)
+    events: list[dict[str, Any]] = []
+    new_digest: Optional[str] = None
+    # 首巡判定：从未成功记录过远端摘要 → 本次为基线巡检（不告警）
+    first_seen = not row.get("remote_digest")
+
+    result = client.check(image_spec, local_digest, mode)
+    if not first_seen and local_digest and result.digest and result.digest != local_digest:
+        new_digest = result.digest
+        events.append(
+            {
+                "type": "update",
+                "target": target,
+                "payload": {
+                    "image": image_spec,
+                    "old_digest": local_digest,
+                    "new_digest": result.digest,
+                },
+                "dedup": notify.digest_dedup_key(target, result.digest),
+            }
+        )
+
+    # new-tag：基线（已见集合）之外新出现的更高版本 tag
+    seen: set[str] = set(db.jload(row.get("newer_tags"), []))
+    if force:
+        alert_tags = list(result.newer_tags)
+    elif first_seen:
+        alert_tags = []
+    else:
+        alert_tags = [t for t in result.newer_tags if t not in seen]
+    for t in alert_tags:
+        events.append(
+            {
+                "type": "new-tag",
+                "target": target,
+                "payload": {"image": image_spec, "tag": t,
+                            "new_digest": new_digest or ""},
+                "dedup": notify.tag_dedup_key(target, t),
+            }
+        )
+
+    # 更新 DB：已见集合累积合并；首巡对齐基线（local = remote）
+    merged_seen = sorted(seen | set(result.newer_tags))
+    changed_now = db.now_iso()
+    with db.tx() as conn:
+        if new_digest:
+            conn.execute(
+                "UPDATE containers SET remote_digest=?, update_available=1, "
+                "remote_changed_at=COALESCE(remote_changed_at,?), last_checked_at=?, newer_tags=? "
+                "WHERE name=?",
+                (new_digest, changed_now, changed_now, db.jdump(merged_seen), target),
+            )
+        elif first_seen:
+            conn.execute(
+                "UPDATE containers SET local_digest=?, remote_digest=?, last_checked_at=?, newer_tags=? "
+                "WHERE name=?",
+                (result.digest, result.digest, changed_now, db.jdump(merged_seen), target),
+            )
+        # 基线巡检：把首个版本记入版本台账（供手动回退）
+        if first_seen and result.digest:
+            from backend.engine import record_version
+
+            record_version(target, result.digest, image_spec, "baseline")
+        else:
+            conn.execute(
+                "UPDATE containers SET last_checked_at=?, newer_tags=? WHERE name=?",
+                (changed_now, db.jdump(merged_seen), target),
+            )
+    return {"events": events, "new_digest": new_digest, "newer_tags": merged_seen}
+
+
+def _emit_events(events: list[dict[str, Any]], containers_map: dict[str, dict[str, Any]], force: bool) -> int:
+    """两级通知 + 项目聚合（PRD 5.4）。返回实际产生的新通知数。
+
+    聚合粒度 = (compose 项目, 通知级别)：update 与 new-tag 分开聚合，
+    保证"可选更新"弱提醒不被强提醒吞没；独立容器逐条发。
+    """
+    if not events:
+        return 0
+    pushed = 0
+    # 按 (项目, 级别) 聚合
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for ev in events:
+        row = containers_map.get(ev["target"], {})
+        proj = row.get("compose_id") or ""
+        buckets.setdefault(f"{proj}|{ev['type']}", []).append(ev)
+    for key, evs in buckets.items():
+        proj, _, ntype = key.rpartition("|")
+        if not proj:
+            # 独立容器：逐条发
+            for ev in evs:
+                if notify.push(ev["type"], ev["target"], ev["payload"], dedup_key=ev["dedup"], force=force):
+                    pushed += 1
+            continue
+        # 项目聚合通知
+        batch_key = "|".join(sorted(e["dedup"] for e in evs))
+        agg_key = "agg|" + ntype + "|" + hashlib.sha256(batch_key.encode()).hexdigest()[:16]
+        payload = {
+            "project": proj,
+            "services": [
+                {"target": e["target"], "type": e["type"], "image": e["payload"].get("image", ""),
+                 "tag": e["payload"].get("tag", ""), "new_digest": e["payload"].get("new_digest")}
+                for e in evs
+            ],
+        }
+        if notify.push(ntype, proj, payload, dedup_key=agg_key, force=force):
+            pushed += 1
+    return pushed
+
+
+def scan(docker_client: Any, force: bool = False) -> dict[str, Any]:
+    """全量扫描：容器采集 → 逐容器检测 → 通知（防抖/聚合）→ 自动已读 → 裁剪。"""
+    if not _SCAN_LOCK.acquire(blocking=False):
+        return {"status": "scan already running"}
+    try:
+        started = time.time()
+        with db.tx() as conn:
+            conn.execute("INSERT INTO scans(started_at) VALUES(?)", (db.now_iso(),))
+        containers_map = _sync_containers(docker_client)
+        client = make_registry_client()
+        rows = db.query("SELECT * FROM containers")
+        all_events: list[dict[str, Any]] = []
+        checked = errors = 0
+        for row in rows:
+            if not row["check_enabled"] or row["ignored"]:
+                continue
+            try:
+                out = _check_target(
+                    client,
+                    row["name"],
+                    row["image_spec"],
+                    row,
+                    row["mode"],
+                    row["local_digest"],
+                    force,
+                )
+                checked += 1
+                all_events.extend(out["events"])
+            except Exception as e:  # 单容器失败不阻断扫描
+                errors += 1
+                logger.warning("check failed for %s: %s", row["name"], e)
+        # 事件聚合 + 两级通知（用 DB 行取 compose_id 做项目聚合）
+        db_rows_map = {r["name"]: r for r in db.query("SELECT * FROM containers")}
+        pushed = _emit_events(all_events, db_rows_map, force)
+
+        # 纯远端监控（watches）：基线/时间线 + 哨兵通知（PRD 3.6 升级）
+        # 首检基线不告警；后续摘要变化 → update 通知（同摘要一次）；
+        # pin-watch 基线外新版本 tag → new-tag 通知（每 tag 一次）；force 重播
+        watch_targets: set[str] = set()
+        for w in db.query("SELECT * FROM watches"):
+            if w["ignored"]:
+                continue
+            try:
+                ref = w["reference"]
+                _, _, tag = parse_image_spec(ref)
+                mode = detect_mode(tag, w["mode"])
+                res = client.check(ref, w["remote_digest"], mode)
+                first_check = not w["remote_digest"]
+                changed = bool(w["remote_digest"] and res.digest and res.digest != w["remote_digest"])
+                if changed and notify.push(
+                    "update", ref,
+                    {"reference": ref, "old_digest": w["remote_digest"],
+                     "new_digest": res.digest, "watch": True},
+                    dedup_key=f"watch-update|{ref}|{res.digest}", force=force,
+                ):
+                    pushed += 1
+                    watch_targets.add(ref)
+                seen: set[str] = set(db.jload(w.get("newer_tags"), []))
+                if force:
+                    alert_tags = list(res.newer_tags)
+                elif first_check:
+                    alert_tags = []
+                else:
+                    alert_tags = [t for t in res.newer_tags if t not in seen]
+                for t in alert_tags:
+                    if notify.push(
+                        "new-tag", ref,
+                        {"reference": ref, "tag": t, "watch": True},
+                        dedup_key=f"watch-newtag|{ref}|{t}", force=force,
+                    ):
+                        pushed += 1
+                        watch_targets.add(ref)
+                merged_seen = sorted(seen | set(res.newer_tags))
+                with db.tx() as conn:
+                    conn.execute(
+                        "UPDATE watches SET remote_digest=?, last_checked_at=?, "
+                        "baseline_digest=COALESCE(baseline_digest,?), newer_tags=? WHERE id=?",
+                        (res.digest, db.now_iso(), res.digest, db.jdump(merged_seen), w["id"]),
+                    )
+                checked += 1
+            except Exception as e:
+                errors += 1
+                logger.warning("watch check failed for %s: %s", w["reference"], e)
+
+        # 自动已读 + 已读裁剪 + 渠道投递
+        containers_rows = {r["name"]: r for r in db.query("SELECT * FROM containers")}
+        marked = notify.auto_mark_read(containers_rows)
+        notify.prune_read()
+        if pushed:
+            targets = sorted({e["target"] for e in all_events} | watch_targets)
+            text = f"容器守望者：{pushed} 项更新发现（{', '.join(targets)[:80]}）"
+            notify.deliver(text, {"count": pushed, "force": force})
+
+        summary = {
+            "checked": checked,
+            "errors": errors,
+            "events": pushed,  # 实际产生的新通知数（防抖后）
+            "auto_read": marked,
+            "duration_ms": int((time.time() - started) * 1000),
+            "force": force,
+        }
+        scan_id = db.query_one("SELECT id FROM scans ORDER BY id DESC LIMIT 1")
+        if scan_id:
+            with db.tx() as conn:
+                conn.execute(
+                    "UPDATE scans SET finished_at=?, summary=? WHERE id=?",
+                    (db.now_iso(), db.jdump(summary), scan_id["id"]),
+                )
+        return {"status": "ok", **summary}
+    finally:
+        _SCAN_LOCK.release()

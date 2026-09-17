@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- 容器守望者 企微机器人头像版：满幅渐变（无边角），盾牌居中放大，适合圆形裁切 -->
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3b6ef6"/>
+      <stop offset="1" stop-color="#1e36af"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#g)"/>
+  <g transform="translate(256 256) scale(5.2) translate(-32 -33)">
+    <path d="M32 8l20 7.5V30c0 12.5-8.75 22.5-20 27.5C20.75 52.5 12 42.5 12 30V15.5L32 8z" fill="#fff"/>
+    <path d="M23.5 38.5l6.25 6.25L41 32.5" fill="none" stroke="#1d40d8" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
