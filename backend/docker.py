@@ -115,8 +115,9 @@ class LocalDockerClient:
 
     def create(self, name: str, image: str, config: dict[str, Any], labels: Optional[dict] = None, image_id: Optional[str] = None) -> dict[str, Any]:
         # image_id：定向用指定镜像 ID 重建（回退场景；本地 dangling 镜像仍存在时有效）
+        # 注意：_run() 会自动加 DOCKER_BIN 前缀，这里只传纯参数（曾误加导致 "docker docker run"）
         ref = image_id or image
-        cmd = [CONFIG.DOCKER_BIN, "run", "-d", "--name", name]
+        cmd = ["run", "-d", "--name", name]
         for k, v in (labels or {}).items():
             cmd += ["-l", f"{k}={v}"]
         for e in config.get("env", []):

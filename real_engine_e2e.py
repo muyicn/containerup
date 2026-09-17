@@ -230,8 +230,9 @@ def main() -> int:
     st, body = c.req("POST", "/api/containers/e2e-web/update")
     results = {x["name"]: x["result"] for x in body.get("containers", [])}
     check("E8 健康门控失败 → 自动回滚", st == 200 and results.get("e2e-web") == "rolled_back", str(body))
-    check("E8 回滚后镜像回到上一版", container_image_id("e2e-web") == cur_img,
-          f"{cur_img[:20]} vs {container_image_id('e2e-web')[:20]}")
+    rolled_img = container_image_id("e2e-web")
+    check("E8 回滚后容器存在且镜像回到上一版", bool(rolled_img) and rolled_img == cur_img,
+          f"{cur_img[:20]} vs {rolled_img[:20]}")
     check("E8 回滚后容器健康运行", dinspect("e2e-web").get("State", {}).get("Running") is True)
 
     # ---------- E9 手动版本回退 ----------
@@ -257,6 +258,7 @@ def main() -> int:
     check("E10 pin 容器不自动置更新标记", api.get_container("e2e-pin").get("update_available") == 0)
 
     # ---------- E11 watch 哨兵 ----------
+    push_app("2.0.0", "watch-baseline")  # pin watch 的基线 tag 必须真实存在，否则检查 404
     st, _ = c.req("POST", "/api/watches", {"reference": f"{REG}/e2e-watch:v1"})
     check("E11 添加 digest watch", st == 200)
     st, _ = c.req("POST", "/api/watches", {"reference": f"{REG}/e2e-app:2.0.0"})
@@ -269,13 +271,16 @@ def main() -> int:
     check("E11 watch 摘要变化 → update 通知", any(t == "update" and w for t, tgt, w, _ in api.notifs()), str(api.notifs()[:6]))
     check("E11 watch 新版本 tag → new-tag 通知", any(t == "new-tag" and w for t, tgt, w, _ in api.notifs()), str(api.notifs()[:8]))
 
-    # ---------- E12 ignored 策略 ----------
-    st, _ = c.req("PUT", "/api/containers/e2e-db/ignored", {"value": True})
+    # ---------- E12 ignored 策略（干净容器，无历史更新标记） ----------
+    sh_ok(f"docker run -d --name e2e-ign {REG}/e2e-db:v1")
+    time.sleep(1)
+    api.scan()  # 基线入库（update_available=0）
+    st, _ = c.req("PUT", "/api/containers/e2e-ign/ignored", {"value": True})
     check("E12 设置忽略", st == 200)
     push_db("v1", "third-release")
     time.sleep(1)
     api.scan()
-    check("E12 忽略后不标记更新", api.get_container("e2e-db").get("update_available") == 0)
+    check("E12 忽略后不标记更新", api.get_container("e2e-ign").get("update_available") == 0)
 
     # ---------- E13 webhook 通知渠道 ----------
     srv, received = start_webhook_sink()

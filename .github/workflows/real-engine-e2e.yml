@@ -47,6 +47,7 @@ jobs:
       - name: Start vigiltainer (host network + real docker.sock, same as NAS compose deployment)
         run: |
           docker run -d --name vt-e2e --network host \
+            --label dev.vigiltainer.managed=false \
             -e VT_INSECURE_REGISTRIES=127.0.0.1:5000 \
             -e VT_DB_PATH=/data/e2e.db \
             -v vt-e2e-data:/data \
@@ -67,7 +68,7 @@ jobs:
         if: failure()
         run: |
           echo "=== vt-e2e logs ==="
-          docker logs vt-e2e 2>&1 | tail -150 || true
+          docker logs vt-e2e 2>&1 | tail -400 || true
           echo "=== containers ==="
           docker ps -a || true
           echo "=== recent registry catalog ==="
@@ -76,5 +77,5 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          docker rm -f e2e-web e2e-db e2e-pin e2e-prot vt-e2e e2e-registry || true
+          docker rm -f e2e-web e2e-db e2e-pin e2e-prot e2e-ign vt-e2e e2e-registry || true
           docker volume rm vt-e2e-data || true
