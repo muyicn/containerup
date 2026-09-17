@@ -7,22 +7,22 @@ from fastapi.testclient import TestClient
 
 from backend import db
 from backend.detect import StaticRegistrySource
-from backend.docker import MockDockerClient
+from backend.docker import MockDockerClient, _fake_digest
 
 
 REGISTRY = StaticRegistrySource({
-    "nginx:1.25-alpine": {"digest": "sha256:" + "f" * 64, "tags": ["1.25-alpine", "1.26-alpine"]},
-    "myapp:2.0": {"digest": "sha256:" + "e" * 64, "tags": ["2.0", "2.1", "3.0"]},
-    "postgres:16.2": {"digest": "sha256:" + "c" * 64, "tags": ["16.2"]},
+    "nginx:1.25-alpine": {"digest": _fake_digest("nginx:1.25-alpine"), "tags": ["1.25-alpine", "1.26-alpine"]},
+    "myapp:2.0": {"digest": _fake_digest("myapp:2.0"), "tags": ["2.0", "2.1", "3.0"]},
+    "postgres:16.2": {"digest": _fake_digest("postgres:16.2"), "tags": ["16.2"]},
 })
 
 
 @pytest.fixture(autouse=True)
 def _reset_registry():
     """防止用例间的 mock registry 状态污染。"""
-    REGISTRY.specs["nginx:1.25-alpine"]["digest"] = "sha256:" + "f" * 64
+    REGISTRY.specs["nginx:1.25-alpine"]["digest"] = _fake_digest("nginx:1.25-alpine")
     REGISTRY.specs["nginx:1.25-alpine"]["tags"] = ["1.25-alpine", "1.26-alpine"]
-    REGISTRY.specs["myapp:2.0"]["digest"] = "sha256:" + "e" * 64
+    REGISTRY.specs["myapp:2.0"]["digest"] = _fake_digest("myapp:2.0")
     REGISTRY.specs["myapp:2.0"]["tags"] = ["2.0", "2.1", "3.0"]
     yield
 

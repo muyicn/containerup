@@ -21,18 +21,19 @@ def _seed_three_containers(client: MockDockerClient):
 
 
 REGISTRY = StaticRegistrySource({
-    "nginx:1.25-alpine": {"digest": "sha256:" + "f" * 64, "tags": ["1.25-alpine"]},
-    "myapp:2.0": {"digest": "sha256:" + "e" * 64, "tags": ["2.0", "2.1", "3.0"]},
-    "redis:7-alpine": {"digest": "sha256:" + "d" * 64, "tags": ["7-alpine"]},
+    "nginx:1.25-alpine": {"digest": _fake_digest("nginx:1.25-alpine"), "tags": ["1.25-alpine"]},
+    "myapp:2.0": {"digest": _fake_digest("myapp:2.0"), "tags": ["2.0", "2.1", "3.0"]},
+    "redis:7-alpine": {"digest": _fake_digest("redis:7-alpine"), "tags": ["7-alpine"]},
 })
 
 
 @pytest.fixture(autouse=True)
 def _reset_registry():
     """防止用例间的 mock registry 状态污染。"""
-    REGISTRY.specs["nginx:1.25-alpine"]["digest"] = "sha256:" + "f" * 64
+    REGISTRY.specs["nginx:1.25-alpine"]["digest"] = _fake_digest("nginx:1.25-alpine")
+    REGISTRY.specs["myapp:2.0"]["digest"] = _fake_digest("myapp:2.0")
     REGISTRY.specs["myapp:2.0"]["tags"] = ["2.0", "2.1", "3.0"]
-    REGISTRY.specs["redis:7-alpine"]["digest"] = "sha256:" + "d" * 64
+    REGISTRY.specs["redis:7-alpine"]["digest"] = _fake_digest("redis:7-alpine")
     yield
 
 
@@ -62,15 +63,8 @@ class TestDetectAndNotify:
         """摘要变化 → update 通知一次；重复扫描同摘要不再通知（防抖）。"""
         monkeypatch.setattr(detect, "make_registry_client", lambda: REGISTRY)
         scan(seeded_client)  # 基线
-        # 模拟远端摘要变化：改变本地摘要记录（等同于"远端更新了"）
-        seeded_client.remove("demo-web")
-        seeded_client.seed_container(
-            "demo-web", "nginx:1.25-alpine",
-            labels={"com.docker.compose.project": "demo-app", "com.docker.compose.service": "web"},
-        )
-        # 强制 local_digest 与远端不同：直接篡改 DB 行的 local_digest
-        with db.tx() as conn:
-            conn.execute("UPDATE containers SET local_digest='sha256:stale' WHERE name='demo-web'")
+        # 模拟远端发布新版本：改 registry 摘要（容器仍运行旧镜像 → local != remote → 检测到更新）
+        REGISTRY.specs["nginx:1.25-alpine"]["digest"] = "sha256:" + "9" * 64
         out1 = scan(seeded_client)
         assert out1["events"] == 1
         out2 = scan(seeded_client)  # 同摘要重复扫描
@@ -82,10 +76,9 @@ class TestDetectAndNotify:
         monkeypatch.setattr(detect, "make_registry_client", lambda: REGISTRY)
         out0 = scan(seeded_client)  # 首巡：2.1/3.0 入基线，无事件
         assert out0["events"] == 0
-        # 仓库发布新大版本 3.5
+        # 仓库发布新大版本 3.5 + 新摘要
         REGISTRY.specs["myapp:2.0"]["tags"].append("3.5")
-        with db.tx() as conn:
-            conn.execute("UPDATE containers SET local_digest='sha256:stale2' WHERE name='demo-api'")
+        REGISTRY.specs["myapp:2.0"]["digest"] = "sha256:" + "8" * 64
         out = scan(seeded_client)
         assert out["events"] == 2  # 1 update 聚合 + 1 new-tag 聚合（3.5）
         new_tags = []
@@ -104,8 +97,9 @@ class TestDetectAndNotify:
         """同项目同批次发现 → 聚合为一条项目级通知（PRD 5.4）。"""
         monkeypatch.setattr(detect, "make_registry_client", lambda: REGISTRY)
         scan(seeded_client)
-        with db.tx() as conn:
-            conn.execute("UPDATE containers SET local_digest='sha256:stale' WHERE name IN ('demo-web','demo-api')")
+        # 两个项目容器的 registry 摘要都变 → 同项目聚合为 1 条
+        REGISTRY.specs["nginx:1.25-alpine"]["digest"] = "sha256:" + "9" * 64
+        REGISTRY.specs["myapp:2.0"]["digest"] = "sha256:" + "8" * 64
         out = scan(seeded_client)
         # demo-web + demo-api 两条差异 → 聚合为 1 条项目级新通知
         assert out["events"] == 1
@@ -119,8 +113,7 @@ class TestDetectAndNotify:
         """强制扫描：无视防抖与已读，重播所有差异（PRD 3.4）。"""
         monkeypatch.setattr(detect, "make_registry_client", lambda: REGISTRY)
         scan(seeded_client)
-        with db.tx() as conn:
-            conn.execute("UPDATE containers SET local_digest='sha256:stale' WHERE name='demo-web'")
+        REGISTRY.specs["nginx:1.25-alpine"]["digest"] = "sha256:" + "9" * 64
         scan(seeded_client)
         before = db.query("SELECT COUNT(*) AS n FROM notifications")[0]["n"]
         scan(seeded_client, force=True)
@@ -131,12 +124,12 @@ class TestDetectAndNotify:
         """目标达成自动已读：本地摘要同步到通知记录的新摘要 → 未读转已读。"""
         monkeypatch.setattr(detect, "make_registry_client", lambda: REGISTRY)
         scan(seeded_client)
-        with db.tx() as conn:
-            conn.execute("UPDATE containers SET local_digest='sha256:stale' WHERE name='demo-web'")
+        REGISTRY.specs["nginx:1.25-alpine"]["digest"] = "sha256:" + "9" * 64
         scan(seeded_client)
         unread_before = db.query("SELECT COUNT(*) AS n FROM notifications WHERE read_at IS NULL")[0]["n"]
         assert unread_before >= 1
-        # 容器"已更新到新摘要"：local_digest == remote_digest
+        # 容器“已更新到新摘要”：_sync_containers 已将容器实际 repo_digest 写入 DB，
+        # 此处模拟更新后容器 repo_digest 对齐远端 → local_digest = remote_digest
         with db.tx() as conn:
             conn.execute(
                 "UPDATE containers SET local_digest=remote_digest WHERE name='demo-web'"
@@ -171,7 +164,7 @@ class TestWatches:
             conn.execute("INSERT INTO watches(reference) VALUES('redis:7-alpine')")
         scan(seeded_client)
         w = db.query_one("SELECT * FROM watches WHERE reference='redis:7-alpine'")
-        assert w["baseline_digest"] == "sha256:" + "d" * 64
+        assert w["baseline_digest"] == _fake_digest("redis:7-alpine")
         assert w["last_checked_at"] is not None
 
     def test_watch_change_notifies_once(self, seeded_client, monkeypatch):

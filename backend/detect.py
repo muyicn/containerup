@@ -84,20 +84,21 @@ def _sync_containers(docker_client: Any) -> dict[str, dict[str, Any]]:
         image_spec = c.get("image", "")
         # 更新对比口径：manifest 摘要（pull 时记录的 RepoDigests），与 registry 检测同口径；
         # 本地构建镜像无 RepoDigests → 置空（首巡仅建基线，不做 digest 对比）
-        local_digest = c.get("repo_digest") or ""
+        repo_digest = c.get("repo_digest") or ""
         with db.tx() as conn:
             conn.execute(
                 """
                 INSERT INTO containers(name, image_spec, compose_id, service, mode,
                     check_enabled, update_enabled, protected, local_digest)
-                VALUES(?,?,?,?,?,1,1,?,NULL)
+                VALUES(?,?,?,?,?,1,1,?,?)
                 ON CONFLICT(name) DO UPDATE SET
                     image_spec=excluded.image_spec,
                     compose_id=excluded.compose_id,
                     service=excluded.service,
-                    protected=excluded.protected
+                    protected=excluded.protected,
+                    local_digest=excluded.local_digest
                 """,
-                (name, image_spec, compose_id, service, "auto", protected),
+                (name, image_spec, compose_id, service, "auto", protected, repo_digest or None),
             )
     # 已消失的容器：清 update_available（继承上游 v1.41 修复语义）
     rows = db.query("SELECT name FROM containers")
@@ -174,11 +175,23 @@ def _check_target(
     changed_now = db.now_iso()
     with db.tx() as conn:
         if new_digest:
+            # 检测到更新：记远端摘要、标记可更新；local_digest 保持容器实际值（_sync_containers 已写入）
             conn.execute(
                 "UPDATE containers SET remote_digest=?, update_available=1, "
                 "remote_changed_at=COALESCE(remote_changed_at,?), last_checked_at=?, newer_tags=? "
                 "WHERE name=?",
-                (new_digest, changed_now, changed_now, db.jdump(merged_seen), target),
+                (result.digest, changed_now, changed_now, db.jdump(merged_seen), target),
+            )
+        elif first_seen:
+            # 首巡未检测到更新（local == remote 或 local 为空）：
+            # - local_digest 已由 _sync_containers 写入容器实际 RepoDigests，不覆盖；
+            # - 仅当 local 为空（本地构建镜像无 RepoDigests）时用远端摘要填充，启用后续 304 优化
+            conn.execute(
+                "UPDATE containers SET "
+                "local_digest=CASE WHEN local_digest IS NULL OR local_digest='' "
+                "THEN ? ELSE local_digest END, "
+                "remote_digest=?, last_checked_at=?, newer_tags=? WHERE name=?",
+                (result.digest, result.digest, changed_now, db.jdump(merged_seen), target),
             )
         elif first_seen:
             conn.execute(
@@ -192,10 +205,14 @@ def _check_target(
 
             record_version(target, result.digest, image_spec, "baseline")
         else:
-            conn.execute(
-                "UPDATE containers SET last_checked_at=?, newer_tags=? WHERE name=?",
-                (changed_now, db.jdump(merged_seen), target),
-            )
+            # 非首巡且无新摘要：容器与远端一致 → 清除更新标记；刷新远端摘要供下次 304 优化
+            up_to_date = bool(local_digest and result.digest and local_digest == result.digest)
+            sets = "last_checked_at=?, newer_tags=?, remote_digest=?"
+            params: list = [changed_now, db.jdump(merged_seen), result.digest]
+            if up_to_date:
+                sets += ", update_available=0"
+            params.append(target)
+            conn.execute(f"UPDATE containers SET {sets} WHERE name=?", params)
     return {"events": events, "new_digest": new_digest, "newer_tags": merged_seen}
 
 

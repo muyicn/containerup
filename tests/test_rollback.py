@@ -8,7 +8,7 @@ from backend.detect import StaticRegistrySource
 from backend.docker import MockDockerClient, _fake_digest
 
 SPEC = "nginx:1.25"
-D_OLD = "sha256:" + "a" * 64
+D_OLD = _fake_digest(SPEC)
 D_NEW = "sha256:" + "b" * 64
 D_NEW2 = "sha256:" + "c" * 64
 

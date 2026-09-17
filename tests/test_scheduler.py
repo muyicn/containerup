@@ -11,9 +11,9 @@ import pytest
 
 from backend import db, engine, scheduler
 from backend.detect import StaticRegistrySource
-from backend.docker import MockDockerClient
+from backend.docker import MockDockerClient, _fake_digest
 
-DIGEST_OLD = "sha256:" + "1" * 64
+DIGEST_OLD = _fake_digest("nginx:1.25-alpine")
 DIGEST_NEW = "sha256:" + "2" * 64
 
 

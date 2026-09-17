@@ -14,11 +14,11 @@ DEMO_PROJECT = "demo-app"
 
 DEMO_REGISTRY_SPECS: dict[str, dict[str, Any]] = {
     "nginx:1.25-alpine": {
-        "digest": "sha256:" + "f" * 64,
+        "digest": _fake_digest("nginx:1.25-alpine"),
         "tags": ["1.25-alpine", "1.25", "latest"],
     },
     "myapp:2.0": {
-        "digest": "sha256:" + "e" * 64,
+        "digest": _fake_digest("myapp:2.0"),
         "tags": ["2.0", "2.1", "3.0", "latest"],
     },
     # db 本地摘要与远端一致 → 无更新（_fake_digest("postgres:16.2")）
