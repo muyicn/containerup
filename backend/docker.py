@@ -364,7 +364,7 @@ class LocalDockerClient:
             return True
         except DockerError as e:
             # 被其他容器引用/已删除等：记录原因便于诊断，安全忽略
-            logging.getLogger("docker").info(
+            logging.getLogger("docker").warning(
                 "rmi %s%s@%s skipped: %s", prefix, repo, digest[:20], e)
             return False
 
