@@ -140,7 +140,9 @@ class LocalDockerClient:
                     continue
                 img = json.loads(line)
                 if (img.get("Digest") or "") == digest and img.get("ID"):
-                    return img["ID"]
+                    # docker images 的 ID 是 12 位短 ID —— 换完整 ID，
+                    # 避免重建后容器 Config.Image 退化为纯 hex（无法识别 sha256: 前缀）
+                    return self._run("image", "inspect", img["ID"], "--format", "{{.Id}}").strip()
         except DockerError:
             pass
         try:
