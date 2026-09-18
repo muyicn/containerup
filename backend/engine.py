@@ -32,6 +32,19 @@ COMPOSE_DEPENDING_LABEL = "com.docker.compose.depends_on"
 CUSTOM_DEPENDING_LABEL = "dev.quenary.tugtainer.depends_on"
 PROTECTED_LABEL = "dev.quenary.tugtainer.protected"
 
+# 镜像元数据标签前缀（OCI 标准 + label-schema）：随镜像走，重建时不复制——
+# 复制旧值会覆盖新镜像自带的版本号/来源等信息
+_IMAGE_META_PREFIXES = ("org.opencontainers.image.", "org.label-schema.")
+
+
+def _keep_container_labels(labels: Any) -> dict[str, str]:
+    """容器重建时保留的用户/compose 标签（依赖、项目、托管标记等）。"""
+    return {
+        k: v
+        for k, v in (labels or {}).items()
+        if not str(k).startswith(_IMAGE_META_PREFIXES)
+    }
+
 
 def get_compose_id(c: dict[str, Any]) -> Optional[str]:
     labels = c.get("labels") or {}
@@ -307,7 +320,7 @@ class UpdateEngine:
             res.errors.append("snapshot missing")
             return res
         old_image = old["image"]
-        old_labels = dict(old.get("labels") or {})
+        old_labels = _keep_container_labels(old.get("labels"))
         old_config = dict(old.get("config") or {})
         was_running = old.get("running", False)
         try:
@@ -373,7 +386,7 @@ class UpdateEngine:
     def _restore(self, name: str, old: dict[str, Any]) -> None:
         try:
             if not self.docker.exists(name) and old.get("running"):
-                self.docker.create(name, old["image"], dict(old.get("config") or {}), labels=dict(old.get("labels") or {}))
+                self.docker.create(name, old["image"], dict(old.get("config") or {}), labels=_keep_container_labels(old.get("labels")))
                 self.docker.start(name)
         except DockerError:
             logger.exception("restore failed for %s", name)
@@ -530,7 +543,7 @@ def run_rollback(
             image_ref = docker_client.resolve_image_ref(row.get("image_spec", ""), target["digest"])
             docker_client.create(
                 name, row.get("image_spec", ""), dict(current.get("config") or {}),
-                labels=dict(current.get("labels") or {}), image_id=image_ref,
+                labels=_keep_container_labels(current.get("labels")), image_id=image_ref,
             )
             docker_client.start(name)
             if not engine._wait_healthy(name):
@@ -543,7 +556,7 @@ def run_rollback(
                     docker_client.remove(name)
                 docker_client.create(
                     name, row.get("image_spec", ""), dict(current.get("config") or {}),
-                    labels=dict(current.get("labels") or {}), image_id=current.get("image_id"),
+                    labels=_keep_container_labels(current.get("labels")), image_id=current.get("image_id"),
                 )
                 docker_client.start(name)
             except DockerError:
