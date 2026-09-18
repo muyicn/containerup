@@ -237,6 +237,7 @@ class ContainerJobResult:
     result: str  # updated | rolled_back | failed | skipped | started
     errors: list[str] = field(default_factory=list)
     old_digest: str = ""  # 更新前的 manifest 摘要（成功后清理旧镜像用）
+    old_image_id: str = ""  # 更新前的完整镜像 ID（清理优先按 ID 直删）
 
     def public(self) -> dict[str, Any]:
         return {"name": self.name, "result": self.result, "errors": self.errors}
@@ -317,8 +318,9 @@ class UpdateEngine:
 
     def _update_one(self, name: str, old: Optional[dict[str, Any]]) -> ContainerJobResult:
         res = ContainerJobResult(name=name, result="failed")
-        # 旧版本 manifest 摘要：更新成功后清理旧镜像用
+        # 旧版本摘要/镜像 ID：更新成功后清理旧镜像用
         res.old_digest = (old.get("repo_digest") or "") if old else ""
+        res.old_image_id = (old.get("image_id") or "") if old else ""
         if not old:
             res.errors.append("snapshot missing")
             return res
@@ -417,6 +419,7 @@ class UpdateEngine:
         """
         res = ContainerJobResult(name=name, result="failed")
         res.old_digest = (old.get("repo_digest") or "")
+        res.old_image_id = (old.get("image_id") or "")
         try:
             self.docker.compose_up(cspec)
         except DockerError as e:
@@ -861,7 +864,8 @@ def run_update(
                         logger.warning("cleanup skip (same digest) %s", r.name)
                     else:
                         try:
-                            if docker_client.remove_image(vrow["image_spec"], r.old_digest):
+                            if docker_client.remove_image(vrow["image_spec"], r.old_digest,
+                                                          image_id=r.old_image_id):
                                 db.log_event("info",
                                     f"已清理旧版本镜像 {vrow['image_spec']}@{str(r.old_digest)[:19]}")
                             else:

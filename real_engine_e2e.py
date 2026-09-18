@@ -228,8 +228,11 @@ def main() -> int:
     img_ref7 = (dinspect("e2e-web").get("Config") or {}).get("Image") or ""
     check("E7 更新后镜像引用保持 tag（不退化成镜像 ID）", img_ref7 == f"{REG}/e2e-app:v1", img_ref7)
     imgs7 = sh_ok("docker images --digests --format '{{.Repository}}@{{.Digest}}'")
+    st, logs7 = c.req("GET", "/api/logs?limit=300")
+    msgs7 = [l.get("msg", "") for l in logs7] if st == 200 else []
     check("E7 旧版本镜像已清理", bool(old_digest_before) and old_digest_before not in imgs7,
-          f"old={old_digest_before[:20]} e2e-app-images={[x for x in imgs7.splitlines() if 'e2e-app' in x]}")
+          f"old={old_digest_before[:20]} e2e-app-images={[x for x in imgs7.splitlines() if 'e2e-app' in x]} "
+          f"cleanup-logs={[m for m in msgs7 if ('清理' in m or 'cleanup' in m)][:4]}")
     st, v = c.req("GET", "/api/containers/e2e-web/versions")
     check("E7 版本台账记录", st == 200 and len(v.get("versions", [])) >= 2, str(v)[:200])
     api.scan()  # 更新后重扫：本地版本号应刷新为新镜像版本

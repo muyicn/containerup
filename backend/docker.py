@@ -348,25 +348,27 @@ class LocalDockerClient:
             pass
         return digest
 
-    def remove_image(self, image_spec: str, digest: str) -> bool:
-        """删除旧版本镜像（更新成功后的清理）。被其他容器引用/不存在时安全忽略。"""
-        if not digest:
-            return False
+    def remove_image(self, image_spec: str, digest: str, image_id: Optional[str] = None) -> bool:
+        """删除旧版本镜像（更新成功后的清理）：优先按完整镜像 ID 直删，
+        回退 repo@digest；被其他容器引用/不存在时安全忽略（记录原因）。"""
         try:
             registry, repo, _ = parse_image_spec(image_spec)
         except ValueError:
             registry, repo = "", ""
-        if not repo:
-            return False
-        prefix = "" if registry in {"registry-1.docker.io", "docker.io"} else f"{registry}/"
-        try:
-            self._run("rmi", f"{prefix}{repo}@{digest}")
-            return True
-        except DockerError as e:
-            # 被其他容器引用/已删除等：记录原因便于诊断，安全忽略
-            logging.getLogger("docker").warning(
-                "rmi %s%s@%s skipped: %s", prefix, repo, digest[:20], e)
-            return False
+        prefix = "" if registry in {"registry-1.docker.io", "docker.io", ""} else f"{registry}/"
+        attempts: list[str] = []
+        if image_id:
+            attempts.append(image_id)
+        if repo and digest:
+            attempts.append(f"{prefix}{repo}@{digest}")
+        for t in attempts:
+            try:
+                self._run("rmi", t)
+                return True
+            except DockerError as e:
+                # 被其他容器引用/已删除等：记录原因便于诊断，继续下一尝试
+                logging.getLogger("docker").warning("rmi %s skipped: %s", t[:40], e)
+        return False
 
     def local_image_versions(self, repo_spec: str) -> list[dict[str, str]]:
         """枚举本地与该镜像仓库相关的镜像（含 dangling 历史版本），供台账回填。
@@ -540,11 +542,11 @@ class MockDockerClient:
             repo, tag = "", ""
         return f"{repo}:{tag}@{digest}" if repo and tag else digest
 
-    def remove_image(self, image_spec: str, digest: str) -> bool:
+    def remove_image(self, image_spec: str, digest: str, image_id: Optional[str] = None) -> bool:
         """Mock：记录清理动作。"""
-        if not digest:
+        if not digest and not image_id:
             return False
-        self.event_log.append(f"rmi:{digest[:20]}")
+        self.event_log.append(f"rmi:{(digest or image_id or '')[:20]}")
         return True
 
     def local_image_versions(self, repo_spec: str) -> list[dict[str, str]]:
