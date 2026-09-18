@@ -853,13 +853,21 @@ def run_update(
                         record_version(r.name, vrow["local_digest"], vrow["image_spec"], "update", job_id,
                                        version=new_ver)
                     # 清理旧版本镜像（best-effort：被其他容器引用时 Docker 会拒绝，安全忽略）
-                    if r.old_digest and r.old_digest != vrow.get("local_digest"):
+                    if vrow is None:
+                        logger.warning("cleanup skip (no vrow) %s", r.name)
+                    elif not r.old_digest:
+                        logger.warning("cleanup skip (no old_digest) %s", r.name)
+                    elif r.old_digest == vrow.get("local_digest"):
+                        logger.warning("cleanup skip (same digest) %s", r.name)
+                    else:
                         try:
                             if docker_client.remove_image(vrow["image_spec"], r.old_digest):
                                 db.log_event("info",
                                     f"已清理旧版本镜像 {vrow['image_spec']}@{str(r.old_digest)[:19]}")
-                        except Exception:
-                            pass
+                            else:
+                                logger.warning("cleanup rmi failed %s old=%s", r.name, r.old_digest[:20])
+                        except Exception as e:
+                            logger.warning("cleanup error %s: %s", r.name, e)
             # 任务结果聚合通知（手动/调度共用；调度传入 trigger=auto）
             out = {"job_id": job_id, "trigger": "auto" if not manual and names is None else "manual", **payload}
             notify_job_result(out)
