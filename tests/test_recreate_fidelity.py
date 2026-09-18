@@ -138,6 +138,37 @@ class TestComposeUpdatePath:
         assert c["config"]["binds"] == ["/opt/app/data:/data"]
         assert c["running"] is True
 
+    def test_compose_up_fails_degrades_to_full_recreate(self, monkeypatch):
+        """compose 文件不可达（典型：文件在宿主机未挂载进平台容器）→ 降级为
+        原容器完整配置 + 新镜像重建，更新仍然成功且配置保真。"""
+        client = MockDockerClient()
+        self._seed_compose_container(client)
+        REGISTRY = StaticRegistrySource({
+            "app:latest": {"digest": _fake_digest("app:latest"), "tags": ["latest"]},
+        }, fallback=True)
+        monkeypatch.setattr("backend.detect.make_registry_client", lambda: REGISTRY)
+        scan(client)
+        REGISTRY.specs["app:latest"]["digest"] = "sha256:" + "9" * 64
+        scan(client)
+        # 模拟 compose up 失败（文件不可见等；与 LocalDockerClient._run 同样抛 DockerError）
+        from backend.docker import DockerError
+
+        def boom(spec):
+            raise DockerError("docker compose: no configuration file found")
+
+        client.compose_up = boom
+        client.set_digest("app:latest", "sha256:" + "9" * 64)  # pull 后 tag 已指向新镜像
+        engine = UpdateEngine(client, health_wait_sec=0)
+        plan = type("P", (), {"to_update": {"web"}, "affected": set(), "order": ["web"]})()
+        results = engine.execute(plan)
+        assert results[0].result == "updated"  # 降级重建后更新成功
+        c = client.inspect("web")
+        # 配置保真 + 镜像已是新版本
+        assert c["config"]["ports"] == {"8080/tcp": [{"HostIp": "", "HostPort": "8080"}]}
+        assert c["config"]["binds"] == ["/opt/app/data:/data"]
+        assert c["repo_digest"] == "sha256:" + "9" * 64
+        assert c["running"] is True
+
     def test_plain_container_full_config_recreate(self, monkeypatch):
         """非 compose 容器：更新重建后完整配置保留（此前会丢端口/挂载）。"""
         client = MockDockerClient()

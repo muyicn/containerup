@@ -402,7 +402,7 @@ def main() -> int:
         ins17 = dinspect("e2e17-panel")
         pb17 = (ins17.get("HostConfig") or {}).get("PortBindings") or {}
         binds17 = (ins17.get("HostConfig") or {}).get("Binds") or []
-        check("E17 端口映射保留", "8391/tcp" in pb17 and (pb17["8391/tcp"] or [{}])[0].get("HostPort") == "8391", str(pb17))
+        check("E17 端口映射保留", "80/tcp" in pb17 and (pb17["80/tcp"] or [{}])[0].get("HostPort") == "8391", str(pb17))
         check("E17 卷挂载保留", any("/tmp/vt-e2e17/data:/srv/data" in b for b in binds17), str(binds17))
         check("E17 compose 标签保留", ((ins17.get("Config") or {}).get("Labels") or {}).get("com.docker.compose.project") == "vt-e2e17")
         check("E17 重启策略保留", ((ins17.get("HostConfig") or {}).get("RestartPolicy") or {}).get("Name") == "unless-stopped")

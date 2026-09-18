@@ -483,23 +483,37 @@ class UpdateEngine:
         try:
             self.docker.compose_up(cspec)
         except DockerError as e:
-            res.errors.append(f"compose up failed: {e}")
-            db.log_event("err", f"compose 更新失败 {name}：{e}，准备自动回滚")
+            # compose up 失败（典型：compose 文件对平台容器不可见——文件在宿主机路径），
+            # 降级为"原容器完整配置 + 新镜像"重建：配置保真语义不变，更新不因 compose
+            # 文件不可达而失败（compose 文件挂载进平台且路径一致的用户才走原生 compose up）
+            db.log_event("warn",
+                f"compose up 失败 {name}（compose 文件可能对平台容器不可见），已降级为原配置完整重建：{str(e)[:120]}")
             try:
-                self._recreate_full(name, old, image_id=(old.get("image_id") or "") or None,
-                                    start=was_running)
-                if was_running and not self._wait_healthy(name):
-                    res.result = "failed"
-                    res.errors.append("unhealthy after rollback")
-                    db.log_event("err", f"回滚后仍不健康 {name}")
-                    return res
-                res.result = "rolled_back"
-                res.errors.append("rolled back to previous image")
-                db.log_event("warn", f"已自动回滚 {name} → 旧镜像（compose 配置保真重建）")
+                if self.docker.exists(name):
+                    self.docker.stop(name)
+                    self.docker.remove(name)
+                self.docker.create(name, old.get("image") or "", dict(old.get("config") or {}),
+                                   labels=_keep_container_labels(old.get("labels")))
+                if was_running:
+                    self.docker.start(name)
+                    if not self._wait_healthy(name):
+                        # 降级重建后不健康 → 回滚旧镜像（完整配置）
+                        self._recreate_full(name, old, image_id=(old.get("image_id") or "") or None, start=True)
+                        if not self._wait_healthy(name):
+                            res.result = "failed"
+                            res.errors.append("unhealthy after rollback")
+                            db.log_event("err", f"回滚后仍不健康 {name}")
+                            return res
+                        res.result = "rolled_back"
+                        res.errors.append("rolled back to previous image")
+                        db.log_event("warn", f"已自动回滚 {name} → 旧镜像（compose 配置保真重建）")
+                        return res
+                res.result = "updated"
+                db.log_event("ok", f"更新完成 {name}（降级重建：端口/挂载/网络配置保真）")
             except DockerError as e2:
                 res.result = "failed"
-                res.errors.append(f"rollback failed: {e2}")
-                db.log_event("err", f"回滚失败 {name}：{e2}")
+                res.errors.append(f"degraded recreate failed: {e2}")
+                db.log_event("err", f"降级重建失败 {name}：{e2}")
             return res
         if not was_running:
             # 原容器本就停止：compose up 会拉起服务，按用户意图重新停止
