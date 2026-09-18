@@ -222,7 +222,10 @@ async function doRollback() {
             <Icon name="arrowRight" cls="w-3.5 h-3.5 text-amber-500 shrink-0" />
             <span class="font-mono font-bold px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-400">{{ c.latest_tag }}</span>
           </template>
-          <span v-else class="text-[11px] text-slate-400 shrink-0">已最新</span>
+          <span v-else class="text-[11px] shrink-0"
+            :class="c.update_available ? 'text-amber-600 dark:text-amber-400' : 'text-slate-400'">
+            {{ c.update_available ? '内容有更新' : '已最新' }}
+          </span>
         </div>
       </div>
 

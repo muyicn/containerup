@@ -108,24 +108,22 @@ class TestDetectAndNotify:
         row = db.query_one("SELECT * FROM containers WHERE name='ref-app'")
         assert row["remote_version"] == "2.0.0"
 
-    def test_local_version_resolved_from_github(self, seeded_client, monkeypatch):
-        """本地版本标签是分支名（main）时，用镜像 source+revision 溯源 GitHub tag 写回版本号。"""
+    def test_local_version_resolved_from_hub_tags(self, seeded_client, monkeypatch):
+        """本地版本标签缺失/是分支名时，用 manifest digest 匹配 Hub tags 反解版本号并写回 DB。"""
         monkeypatch.setattr(detect, "make_registry_client", lambda: REGISTRY)
+        dig = _fake_digest("ghimg:latest").replace("sha256:", "")
         monkeypatch.setattr(
-            "backend.github_versions.version_for_revision",
-            lambda s, r: "v2.2.0" if "ctyun" in (s or "") else "",
+            "backend.detect.version_by_digest",
+            lambda spec, d: "v0.7.21" if (d or "").replace("sha256:", "") == dig else "",
         )
         seeded_client.seed_container(
             "gh-app", "ghimg:latest",
-            labels={"com.docker.compose.project": "ghproj",
-                    "org.opencontainers.image.version": "main",
-                    "org.opencontainers.image.source": "https://github.com/muyicn/ctyun-dashboard",
-                    "org.opencontainers.image.revision": "adf9a5fc2f41"},
+            labels={"com.docker.compose.project": "ghproj"},
         )
         REGISTRY.specs["ghimg:latest"] = {"digest": _fake_digest("ghimg:latest"), "tags": ["latest"]}
         scan(seeded_client)
         row = db.query_one("SELECT * FROM containers WHERE name='gh-app'")
-        assert row["local_version"] == "v2.2.0"  # main → 溯源 → v2.2.0，已写回 DB
+        assert row["local_version"] == "v0.7.21"  # 摘要 ≡ v0.7.21，已写回 DB
 
     def test_update_alert_once_and_dedup(self, seeded_client, monkeypatch):
         """摘要变化 → update 通知一次；重复扫描同摘要不再通知（防抖）。"""

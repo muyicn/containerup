@@ -14,17 +14,153 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlencode, urlparse
 
 import httpx
 
-from backend import github_versions
+from backend import db
 from backend.config import CONFIG
 
 FLOATING_TAGS = {"latest", "nightly", "dev", "canary", "beta", "edge", "stable", "master", "main", "test"}
 # 数字开头的版本号 tag（宽松判定：8.4.5 / v3.9 / 1.2.3-alpine）
 VERSION_TAG_RE = re.compile(r"^v?\d+(\.\d+)*(-[a-zA-Z0-9._]+)*$")
+
+# ---------- 版本号工具（本地/远端共用） ----------
+
+# 像版本号的值：1.0 / v2.2.0 / 2026.09.18 / 1.0.0-beta.1（分支名 main/master/dev 不算）
+_VERSION_RE = re.compile(r"^v?\d+(\.\d+){0,3}([-+][0-9A-Za-z.-]+)?$", re.IGNORECASE)
+
+
+def plausible_version(value: str) -> bool:
+    """版本标签值/tag 名是否像真实版本号（空串/分支名等不算）。"""
+    return bool(value) and bool(_VERSION_RE.match(str(value).strip()))
+
+
+def _ver_key(tag: str):
+    """版本号排序键：数值逐段比较，预发布（-beta.1）低于正式版。"""
+    m = re.match(r"^v?(\d+(?:\.\d+){0,3})([-+][0-9A-Za-z.-]+)?$", tag, re.IGNORECASE)
+    if not m:
+        return (0, 0, 0, 0, 0)
+    nums = [int(x) for x in m.group(1).split(".")]
+    nums += [0] * (4 - len(nums))
+    pre = -1 if m.group(2) else 0  # 预发布排正式版之前
+    return (nums[0], nums[1], nums[2], nums[3], pre)
+
+
+# ---------- Docker Hub tags digest 匹配（浮动 tag 版本号解析） ----------
+
+_HUB_TIMEOUT = 10.0
+_HUB_MAX_PAGES = 3
+_HUB_EMPTY_TTL = timedelta(hours=1)  # 确认无匹配的空缓存有效期，过期重查
+
+
+def _parse_hub_tags(payload: dict) -> dict[str, tuple[str, str]]:
+    """解析 hub.docker.com tags 响应：digest → (最新推送的版本号 tag, last_updated)。
+
+    同一 digest 挂多个版本号 tag 时取最近推送且版本号最大的（如 1.0/v1.0.0 双标）。
+    非版本号 tag（latest/beta/commit hash）不参与映射。
+    """
+    out: dict[str, tuple[str, str]] = {}
+    for t in (payload or {}).get("results") or []:
+        name = (t.get("name") or "").strip()
+        dg = (t.get("digest") or "").replace("sha256:", "").strip().lower()
+        if not name or not dg or not plausible_version(name):
+            continue
+        lu = t.get("last_updated") or ""
+        prev = out.get(dg)
+        if prev is None or lu > prev[1] or (lu == prev[1] and _ver_key(name) > _ver_key(prev[0])):
+            out[dg] = (name[:64], lu)
+    return out
+
+
+def _fetch_hub_versions(repo: str) -> dict[str, tuple[str, str]]:
+    """拉取 Docker Hub 仓库 tags 列表（带 digest），最多 3 页 × 100。"""
+    out: dict[str, tuple[str, str]] = {}
+    with httpx.Client(timeout=_HUB_TIMEOUT, headers={"User-Agent": "containerup"}) as client:
+        for page in range(1, _HUB_MAX_PAGES + 1):
+            resp = client.get(
+                f"https://hub.docker.com/v2/repositories/{repo}/tags",
+                params={"page_size": 100, "page": page},
+            )
+            if resp.status_code == 404 and page > 1:
+                break  # 翻页超出实际页数（tags 总数恰为整页时）：正常结束
+            if resp.status_code != 200:
+                raise RuntimeError(f"hub api {resp.status_code} for {repo} tags")
+            data = resp.json() or {}
+            out.update(_parse_hub_tags(data))
+            if len(data.get("results") or []) < 100:
+                break
+    return out
+
+
+def _cache_get(repo: str, key: str) -> Optional[str]:
+    """返回 None=未缓存；str=已缓存（空串=确认无匹配，1h TTL）。"""
+    row = db.query_one(
+        "SELECT version, updated_at FROM tag_version_cache WHERE repo=? AND revision=?",
+        (repo, key),
+    )
+    if row is None:
+        return None
+    if row["version"]:
+        return row["version"]
+    try:
+        t = datetime.fromisoformat((row["updated_at"] or "").replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) - t < _HUB_EMPTY_TTL:
+            return ""
+    except Exception:
+        pass
+    return None  # 空缓存过期：重查
+
+
+def _cache_put(repo: str, key: str, ver: str) -> None:
+    with db.tx() as conn:
+        conn.execute(
+            "INSERT INTO tag_version_cache(repo, revision, version, updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(repo, revision) DO UPDATE SET "
+            "version=excluded.version, updated_at=excluded.updated_at",
+            (repo, key, ver, db.now_iso()),
+        )
+
+
+def version_by_digest(spec: str, digest: Optional[str]) -> str:
+    """用 manifest digest 匹配 Docker Hub tags 列表解析版本号。
+
+    原理：latest 等浮动 tag 与版本号 tag 常指向同一 digest（如 hermes-web-ui 的
+    latest ≡ v0.7.22）；用本地/远端 digest 反查即可确定真实版本。
+    数据源是 registry 本身，比镜像 config 标签更权威（标签可能漏写/写分支名）。
+
+    缓存策略：digest→版本 持久缓存（版本号 tag 指向固定）；确认无匹配缓存空串
+    1 小时（避免每轮重复拉 tags 列表，同时新 tag 推送后能自动补上）；
+    网络失败不缓存，下轮自愈。仅支持 Docker Hub，其他 registry 返回空串。
+    """
+    if not digest:
+        return ""
+    registry, repo, _ = parse_image_spec(spec)
+    if registry not in {"docker.io", "registry-1.docker.io"}:
+        return ""
+    d = digest.replace("sha256:", "").strip().lower()
+    if len(d) < 12:
+        return ""
+    cached = _cache_get(repo, d)
+    if cached is not None:
+        return cached
+    try:
+        mapping = _fetch_hub_versions(repo)
+    except Exception as e:
+        import logging
+
+        logging.getLogger("registry").info("hub tags fetch failed for %s: %s", repo, e)
+        return ""  # 不缓存：下轮自愈
+    # 一次拉取全量入缓存：同仓库其他 digest 零外呼；空缓存 1h TTL 内不覆盖
+    for dg, (name, _lu) in mapping.items():
+        if _cache_get(repo, dg) is None:
+            _cache_put(repo, dg, name)
+    ver = mapping.get(d, ("", ""))[0]
+    if d not in mapping:
+        _cache_put(repo, d, "")  # 本次列表中无匹配：缓存空串防重复拉列表
+    return ver
 
 MANIFEST_ACCEPT = ",".join(
     [
@@ -214,9 +350,12 @@ class RegistryClient:
             if bresp.status_code != 200:
                 return ""
             labels = ((bresp.json() or {}).get("config") or {}).get("Labels") or {}
-            # 版本标签像版本号直接用；值是分支名（main 等）或缺失时，
-            # 用 source+revision 标注溯源 GitHub tag（持久缓存）
-            return github_versions.resolve_version(labels)
+            for key in self._VERSION_LABELS:
+                v = labels.get(key)
+                if v:
+                    return str(v)[:64]
+            # config 标签无版本号：返回空串，由 detect 层用 tags digest 匹配兜底
+            return ""
         except Exception:
             return ""
         return ""

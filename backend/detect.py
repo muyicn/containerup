@@ -14,7 +14,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
-from backend import db, notify, github_versions
+from backend import db, notify
 from backend.config import CONFIG
 from backend.engine import (
     COMPOSE_PROJECT_LABEL,
@@ -23,7 +23,14 @@ from backend.engine import (
     get_compose_id,
     get_service_name,
 )
-from backend.registry import RegistryClient, RegistryResult, detect_mode, parse_image_spec
+from backend.registry import (
+    RegistryClient,
+    RegistryResult,
+    detect_mode,
+    parse_image_spec,
+    plausible_version,
+    version_by_digest,
+)
 
 logger = logging.getLogger("detect")
 
@@ -133,7 +140,6 @@ def _check_target(
     mode_override: str,
     local_digest: Optional[str],
     force: bool,
-    labels: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     """检查单个目标，返回事件明细。不直接发通知（由调用方聚合）。
 
@@ -148,19 +154,16 @@ def _check_target(
     remote_version: str = ""
     # 本地版本号（镜像 OCI 标签，_sync_containers 已写入 DB 行）
     local_version: str = row.get("local_version") or ""
-    # 版本号溯源：标签值不像版本号（空/main 这类分支名）时，用镜像标注的
-    # 源码仓库 + 构建 commit 到 GitHub 反查对应 tag（如 v2.2.0）。
+    # 版本号补齐：标签值不像版本号（空/main 这类分支名）时，用 manifest digest
+    # 匹配 Docker Hub tags 列表反解真实版本号（如 f4133b472867 ≡ v0.7.21）。
     # 持久缓存下首轮后零外呼；查到后写回 DB 供前端展示与台账记录。
-    if not github_versions.plausible_version(local_version):
-        gh = github_versions.version_for_revision(
-            (labels or {}).get("org.opencontainers.image.source"),
-            (labels or {}).get("org.opencontainers.image.revision"),
-        )
-        if gh and gh != local_version:
-            local_version = gh
+    if not plausible_version(local_version) and local_digest:
+        tv = version_by_digest(image_spec, local_digest)
+        if tv and tv != local_version:
+            local_version = tv
             with db.tx() as conn:
                 conn.execute(
-                    "UPDATE containers SET local_version=? WHERE name=?", (gh, target)
+                    "UPDATE containers SET local_version=? WHERE name=?", (tv, target)
                 )
     # 首巡判定：从未成功记录过远端摘要 → 本次为基线巡检（不告警）
     first_seen = not row.get("remote_digest")
@@ -183,6 +186,12 @@ def _check_target(
                 remote_version = ""
         else:
             remote_version = row.get("remote_version") or ""
+        # config 标签没有像样的版本号（空/main 等）→ tags digest 匹配兜底
+        # （数据源 registry 本身：远端 latest 摘要 ≡ 某个版本号 tag 摘要）
+        if not plausible_version(remote_version):
+            tv = version_by_digest(image_spec, result.digest)
+            if tv:
+                remote_version = tv
         events.append(
             {
                 "type": "update",
@@ -326,8 +335,6 @@ def scan(docker_client: Any, force: bool = False) -> dict[str, Any]:
 
             def _do(row: dict[str, Any]) -> tuple[Optional[dict[str, Any]], Optional[tuple[str, str]]]:
                 try:
-                    # 运行时快照里的镜像 Labels（含 source/revision 标注）供版本号溯源
-                    rt = containers_map.get(row["name"]) or {}
                     out = _check_target(
                         client,
                         row["name"],
@@ -336,7 +343,6 @@ def scan(docker_client: Any, force: bool = False) -> dict[str, Any]:
                         row["mode"],
                         row["local_digest"],
                         force,
-                        labels=rt.get("labels") or {},
                     )
                     return out, None
                 except Exception as e:  # 单容器失败不阻断扫描

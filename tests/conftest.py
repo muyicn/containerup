@@ -42,3 +42,14 @@ def fresh_db():
     dbm.init_db()
     auth_m._FAILS.clear()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_network_version_lookup(monkeypatch):
+    """默认禁止版本号解析真实外呼（Hub tags）；需要网络行为的用例自行 patch 覆盖。"""
+    monkeypatch.setattr("backend.registry._fetch_hub_versions", lambda repo: (_ for _ in ()).throw(
+        RuntimeError("network disabled in tests")))
+    monkeypatch.setattr("backend.registry.version_by_digest", lambda spec, digest: "")
+    import backend.detect as _detect
+
+    monkeypatch.setattr(_detect, "version_by_digest", lambda spec, digest: "")
