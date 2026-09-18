@@ -220,3 +220,5 @@ class TestUpdateVersionRefresh:
         assert row["local_version"] == "3.3.0"  # 界面 tag 行立即显示新版本号
         assert row["remote_version"] == ""
         assert row["update_available"] == 0
+        # 旧版本镜像已清理（best-effort rmi）
+        assert any(e.startswith("rmi:") for e in client.event_log)

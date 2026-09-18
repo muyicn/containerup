@@ -302,11 +302,40 @@ class LocalDockerClient:
         return _fake_digest(spec)
 
     def resolve_image_ref(self, repo_spec: str, digest: str) -> str:
-        """把台账中的 manifest digest 解析为本地可运行的镜像引用。
+        """把台账中的 manifest digest 解析为可运行的镜像引用。
 
-        优先匹配本地已存在的 RepoDigest；缺失时按 repo@digest 从 registry 重新拉取
-        （镜像被清理后的现实恢复路径）。返回 daemon 可直接 run 的引用。
+        返回 repo:tag@sha256:digest 形式：既精确锁定历史版本，又保留 tag 语义
+        （容器镜像引用仍显示 latest 而非镜像 ID，符合 compose/用户直觉）。
+        本地缺失该 digest 时按 digest 重新拉取（镜像被清理后的现实恢复路径）。
         """
+        try:
+            registry, repo, tag = parse_image_spec(repo_spec)
+        except ValueError:
+            registry, repo, tag = "", "", ""
+        if repo and digest:
+            # 本地已有该 digest 则直接引用；缺失时先按 digest 拉取
+            have = False
+            try:
+                raw = self._run("images", "--digests", "--format", "{{json .}}")
+                for line in raw.splitlines():
+                    if not line.strip():
+                        continue
+                    img = json.loads(line)
+                    if (img.get("Digest") or "") == digest and (img.get("Repository") or "").endswith(repo.split("/")[-1]):
+                        have = True
+                        break
+            except DockerError:
+                pass
+            if not have:
+                try:
+                    pull_ref = f"{repo}@{digest}" if registry in {"registry-1.docker.io", "docker.io"} \
+                        else f"{registry}/{repo}@{digest}"
+                    self._run("pull", pull_ref)
+                except DockerError:
+                    pass  # 预拉失败不阻断：docker run 时会再拉
+            prefix = "" if registry in {"registry-1.docker.io", "docker.io"} else f"{registry}/"
+            return f"{prefix}{repo}:{tag}@{digest}" if tag else f"{prefix}{repo}@{digest}"
+        # 兼容兑底：无 repo/tag 信息时退回完整 Image ID
         try:
             raw = self._run("images", "--digests", "--format", "{{json .}}")
             for line in raw.splitlines():
@@ -314,20 +343,27 @@ class LocalDockerClient:
                     continue
                 img = json.loads(line)
                 if (img.get("Digest") or "") == digest and img.get("ID"):
-                    # docker images 的 ID 是 12 位短 ID —— 换完整 ID，
-                    # 避免重建后容器 Config.Image 退化为纯 hex（无法识别 sha256: 前缀）
                     return self._run("image", "inspect", img["ID"], "--format", "{{.Id}}").strip()
         except DockerError:
             pass
+        return digest
+
+    def remove_image(self, image_spec: str, digest: str) -> bool:
+        """删除旧版本镜像（更新成功后的清理）。被其他容器引用/不存在时安全忽略。"""
+        if not digest:
+            return False
         try:
-            registry, repo, _ = parse_image_spec(repo_spec)
+            registry, repo, _ = parse_image_spec(image_spec)
         except ValueError:
             registry, repo = "", ""
-        if repo:
-            ref = f"{repo}@{digest}" if registry in {"registry-1.docker.io"} else f"{registry}/{repo}@{digest}"
-            self._run("pull", ref)
-            return self._run("image", "inspect", ref, "--format", "{{.Id}}").strip()
-        return digest
+        if not repo:
+            return False
+        prefix = "" if registry in {"registry-1.docker.io", "docker.io"} else f"{registry}/"
+        try:
+            self._run("rmi", f"{prefix}{repo}@{digest}")
+            return True
+        except DockerError:
+            return False  # 被其他容器引用或已删除：忽略
 
     def local_image_versions(self, repo_spec: str) -> list[dict[str, str]]:
         """枚举本地与该镜像仓库相关的镜像（含 dangling 历史版本），供台账回填。
@@ -494,8 +530,19 @@ class MockDockerClient:
         return _fake_digest(spec)
 
     def resolve_image_ref(self, repo_spec: str, digest: str) -> str:
-        """Mock 无 config/manifest digest 之分，原样返回。"""
-        return digest
+        """Mock 无 config/manifest digest 之分，返回 tag@digest 引用形态。"""
+        try:
+            _, repo, tag = parse_image_spec(repo_spec)
+        except ValueError:
+            repo, tag = "", ""
+        return f"{repo}:{tag}@{digest}" if repo and tag else digest
+
+    def remove_image(self, image_spec: str, digest: str) -> bool:
+        """Mock：记录清理动作。"""
+        if not digest:
+            return False
+        self.event_log.append(f"rmi:{digest[:20]}")
+        return True
 
     def local_image_versions(self, repo_spec: str) -> list[dict[str, str]]:
         """Mock：无本地镜像仓库可枚举。"""

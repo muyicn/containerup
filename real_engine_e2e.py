@@ -218,12 +218,18 @@ def main() -> int:
 
     # ---------- E7 手动单容器更新 ----------
     old_img = container_image_id("e2e-web")
+    old_digest_before = api.get_container("e2e-web").get("local_digest") or ""
     st, body = c.req("POST", "/api/containers/e2e-web/update")
     results = {x["name"]: x["result"] for x in body.get("containers", [])}
     check("E7 单容器更新成功", st == 200 and results.get("e2e-web") == "updated", str(body))
     new_img = container_image_id("e2e-web")
     check("E7 镜像真实更换（Image ID 变化）", bool(new_img) and new_img != old_img, f"{old_img[:20]} -> {new_img[:20]}")
     check("E7 新容器运行中", dinspect("e2e-web").get("State", {}).get("Running") is True)
+    img_ref7 = (dinspect("e2e-web").get("Config") or {}).get("Image") or ""
+    check("E7 更新后镜像引用保持 tag（不退化成镜像 ID）", img_ref7 == f"{REG}/e2e-app:v1", img_ref7)
+    imgs7 = sh_ok("docker images --digests --format '{{.Repository}}@{{.Digest}}'")
+    check("E7 旧版本镜像已清理", bool(old_digest_before) and old_digest_before not in imgs7,
+          f"old={old_digest_before[:20]}")
     st, v = c.req("GET", "/api/containers/e2e-web/versions")
     check("E7 版本台账记录", st == 200 and len(v.get("versions", [])) >= 2, str(v)[:200])
     api.scan()  # 更新后重扫：本地版本号应刷新为新镜像版本
@@ -264,6 +270,9 @@ def main() -> int:
         check("E9 指定版本回退成功", st == 200 and body.get("status") == "ok", str(body))
         check("E9 回退后自动关闭更新开关", api.get_container("e2e-web").get("update_enabled") == 0)
         check("E9 回退后容器运行", dinspect("e2e-web").get("State", {}).get("Running") is True)
+        img_ref9 = (dinspect("e2e-web").get("Config") or {}).get("Image") or ""
+        check("E9 回退后镜像引用保留 tag（tag@digest，不退化成镜像 ID）",
+              ":v1@sha256:" in img_ref9, img_ref9)
 
     # ---------- E10 pin-watch 新版本 tag ----------
     push_app("1.1.0", "new-version")

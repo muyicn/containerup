@@ -236,6 +236,7 @@ class ContainerJobResult:
     name: str
     result: str  # updated | rolled_back | failed | skipped | started
     errors: list[str] = field(default_factory=list)
+    old_digest: str = ""  # 更新前的 manifest 摘要（成功后清理旧镜像用）
 
     def public(self) -> dict[str, Any]:
         return {"name": self.name, "result": self.result, "errors": self.errors}
@@ -316,6 +317,8 @@ class UpdateEngine:
 
     def _update_one(self, name: str, old: Optional[dict[str, Any]]) -> ContainerJobResult:
         res = ContainerJobResult(name=name, result="failed")
+        # 旧版本 manifest 摘要：更新成功后清理旧镜像用
+        res.old_digest = (old.get("repo_digest") or "") if old else ""
         if not old:
             res.errors.append("snapshot missing")
             return res
@@ -363,9 +366,16 @@ class UpdateEngine:
             res.errors.append(str(e))
             db.log_event("err", f"更新失败 {name}：{e}，准备自动回滚")
 
-        # ---- 自动回滚：旧镜像 ID 定向重建（真实 Docker 中 pull 后 tag 已指向新镜像，
-        #      按 tag 重建等于没回退 —— 必须用旧镜像 ID）----
-        old_image_id = (old.get("image_id") or "") or None
+        # ---- 自动回滚：旧镜像定向重建（真实 Docker 中 pull 后 tag 已指向新镜像，
+        #      按 tag 重建等于没回退 —— 必须用 tag@digest 精确锁定旧版本）----
+        old_digest = (old.get("repo_digest") or "") or ""
+        old_image_id = None
+        if old_digest:
+            try:
+                old_image_id = self.docker.resolve_image_ref(old_image, old_digest)
+            except DockerError:
+                old_image_id = None
+        old_image_id = old_image_id or (old.get("image_id") or "") or None
         try:
             self._recreate_full(name, old, image_id=old_image_id)
             if was_running:
@@ -386,80 +396,6 @@ class UpdateEngine:
             db.log_event("err", f"回滚失败 {name}：{e}")
         return res
 
-    def _recreate_full(self, name: str, old: dict[str, Any], image_id: Optional[str] = None) -> None:
-        """按旧容器完整配置（env/cmd/端口/挂载/网络等）+ 指定镜像重建并启动。"""
-        if self.docker.exists(name):
-            self.docker.stop(name)
-            self.docker.remove(name)
-        self.docker.create(
-            name, old.get("image") or "", dict(old.get("config") or {}),
-            labels=_keep_container_labels(old.get("labels")), image_id=image_id,
-        )
-        self.docker.start(name)
-
-    def _update_compose(self, name: str, old: dict[str, Any], cspec: dict, was_running: bool) -> ContainerJobResult:
-        """compose 管理的容器更新：compose up 重建（配置全保留）。
-
-        前置：docker pull 已把新镜像拉到本地，compose up 检测到镜像 ID 变化自动
-        recreate。失败回滚用旧镜像 ID + 完整配置定向重建（compose 无法按 digest 定向）。
-        """
-        res = ContainerJobResult(name=name, result="failed")
-        try:
-            self.docker.compose_up(cspec)
-        except DockerError as e:
-            res.errors.append(f"compose up failed: {e}")
-            db.log_event("err", f"compose 更新失败 {name}：{e}，准备自动回滚")
-            try:
-                self._recreate_full(name, old, image_id=(old.get("image_id") or "") or None)
-                if was_running and not self._wait_healthy(name):
-                    res.result = "failed"
-                    res.errors.append("unhealthy after rollback")
-                    db.log_event("err", f"回滚后仍不健康 {name}")
-                    return res
-                res.result = "rolled_back"
-                res.errors.append("rolled back to previous image")
-                db.log_event("warn", f"已自动回滚 {name} → 旧镜像（compose 配置保真重建）")
-            except DockerError as e2:
-                res.result = "failed"
-                res.errors.append(f"rollback failed: {e2}")
-                db.log_event("err", f"回滚失败 {name}：{e2}")
-            return res
-        if not was_running:
-            # 原容器本就停止：compose up 会拉起服务，按用户意图重新停止
-            try:
-                self.docker.stop(name)
-            except DockerError:
-                pass
-            res.result = "updated"
-            db.log_event("ok", f"更新完成 {name}（compose 重建，配置保真；容器保持停止）")
-            return res
-        if not self._wait_healthy(name):
-            res.errors.append("healthcheck failed after update")
-            db.log_event("warn", f"更新后健康检查未通过 {name}，准备自动回滚")
-            try:
-                self._recreate_full(name, old, image_id=(old.get("image_id") or "") or None)
-                if not self._wait_healthy(name):
-                    res.result = "failed"
-                    res.errors.append("unhealthy after rollback")
-                    db.log_event("err", f"回滚后仍不健康 {name}")
-                    return res
-                res.result = "rolled_back"
-                res.errors.append("rolled back to previous image")
-                db.log_event("warn", f"已自动回滚 {name} → 旧镜像（compose 配置保真重建）")
-            except DockerError as e2:
-                res.result = "failed"
-                res.errors.append(f"rollback failed: {e2}")
-                db.log_event("err", f"回滚失败 {name}：{e2}")
-            return res
-        res.result = "updated"
-        new_digest = ""
-        try:
-            new_digest = (self.docker.inspect(name).get("repo_digest") or "")[:19]
-        except DockerError:
-            pass
-        db.log_event("ok", f"更新完成 {name}（compose 重建，端口/挂载/网络配置保真）→ {new_digest or cspec['service']}")
-        return res
-
     def _recreate_full(self, name: str, old: dict[str, Any], image_id: Optional[str] = None, start: bool = True) -> None:
         """按旧容器完整配置（env/cmd/端口/挂载/网络等，inspect 快照已全量携带）重建，可选启动。"""
         if self.docker.exists(name):
@@ -477,9 +413,10 @@ class UpdateEngine:
 
         前置：docker pull 已把新镜像拉到本地，compose up 检测到镜像 ID 变化自动
         recreate，端口/挂载/网络/依赖等全部按 compose 文件保留。
-        失败回滚：compose 无法按 digest 定向 → 旧镜像 ID + 完整配置定向重建。
+        失败回滚：compose 无法按 digest 定向 → 降级为 tag@digest 引用 + 完整配置定向重建。
         """
         res = ContainerJobResult(name=name, result="failed")
+        res.old_digest = (old.get("repo_digest") or "")
         try:
             self.docker.compose_up(cspec)
         except DockerError as e:
@@ -915,6 +852,14 @@ def run_update(
                                 pass
                         record_version(r.name, vrow["local_digest"], vrow["image_spec"], "update", job_id,
                                        version=new_ver)
+                    # 清理旧版本镜像（best-effort：被其他容器引用时 Docker 会拒绝，安全忽略）
+                    if r.old_digest and r.old_digest != vrow.get("local_digest"):
+                        try:
+                            if docker_client.remove_image(vrow["image_spec"], r.old_digest):
+                                db.log_event("info",
+                                    f"已清理旧版本镜像 {vrow['image_spec']}@{str(r.old_digest)[:19]}")
+                        except Exception:
+                            pass
             # 任务结果聚合通知（手动/调度共用；调度传入 trigger=auto）
             out = {"job_id": job_id, "trigger": "auto" if not manual and names is None else "manual", **payload}
             notify_job_result(out)

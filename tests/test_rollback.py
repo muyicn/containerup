@@ -94,7 +94,8 @@ class TestManualRollback:
         assert out["from_digest"] == D_NEW
         assert out["to_digest"] == D_OLD
         c = seeded.inspect("web")
-        assert c["image_id"] == D_OLD
+        # 回退后镜像引用保留 tag（tag@digest 形式，不退化成裸镜像 ID）
+        assert c["image_id"].endswith(D_OLD) and "@" in c["image_id"]
         assert c["running"] is True
         row = db.query_one("SELECT * FROM containers WHERE name='web'")
         assert row["local_digest"] == D_OLD
@@ -116,7 +117,7 @@ class TestManualRollback:
         _update_to(seeded, reg, monkeypatch, D_NEW2)
         out = engine.run_rollback(seeded, "web", digest=D_OLD)
         assert out["to_digest"] == D_OLD
-        assert seeded.inspect("web")["image_id"] == D_OLD
+        assert seeded.inspect("web")["image_id"].endswith(D_OLD)
 
     def test_rollback_no_previous_version(self, seeded, monkeypatch):
         """只有当前版本（无历史）→ 明确报错，且当前版本已入台账。"""
@@ -180,7 +181,7 @@ class TestAutoRollbackImageId:
         assert r["result"] == "rolled_back"
         c = seeded.inspect("web")
         # 关键断言：回滚后的镜像 ID 是旧镜像，而非新摘要
-        assert c["image_id"] == _fake_digest(SPEC)
+        assert c["image_id"].endswith(_fake_digest(SPEC))
         assert c["image_id"] != D_NEW
         assert c["running"] is True
 
@@ -225,7 +226,7 @@ class TestRollbackAPI:
         r = tc.post("/api/containers/web/rollback", json={})
         assert r.status_code == 200
         assert r.json()["to_digest"] == D_OLD
-        assert d.inspect("web")["image_id"] == D_OLD
+        assert d.inspect("web")["image_id"].endswith(D_OLD)
         # 显式指定不存在的 digest → 目标不可用报错
         r = tc.post("/api/containers/web/rollback", json={"digest": D_NEW2})
         assert r.status_code in (400, 500)
