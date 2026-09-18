@@ -15,6 +15,12 @@ RUN python -c "import urllib.request; urllib.request.urlretrieve('https://downlo
     && chmod +x /usr/local/bin/docker \
     && rm -rf /tmp/docker /tmp/docker.tgz
 
+# 内置 docker compose v2 插件：compose 管理的容器更新需 compose up 重建（配置保真）
+RUN mkdir -p /usr/local/lib/docker/cli-plugins \
+    && python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/docker/compose/releases/download/v2.32.4/docker-compose-linux-x86_64', '/usr/local/lib/docker/cli-plugins/docker-compose')" \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+    && docker compose version
+
 COPY run.py .
 COPY backend/ backend/
 COPY frontend/dist/ frontend/dist/

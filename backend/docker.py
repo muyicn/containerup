@@ -37,6 +37,132 @@ def _label_version(labels: Optional[dict[str, str]]) -> str:
     return ""
 
 
+def compose_spec(labels: Optional[dict[str, str]]) -> Optional[dict[str, Any]]:
+    """从容器标签提取 compose 项目规格（project/service/config_files 三要素齐全才视为 compose 管理）。
+
+    compose 管理的容器更新必须走 compose up 重建（保留端口/挂载/网络等全部配置），
+    不能用 docker run 自行重建 —— 那会丢掉 compose 定义的所有运行时配置。
+    """
+    if not labels:
+        return None
+    project = (labels.get("com.docker.compose.project") or "").strip()
+    service = (labels.get("com.docker.compose.service") or "").strip()
+    files_raw = (labels.get("com.docker.compose.project.config_files") or "").strip()
+    if not project or not service or not files_raw:
+        return None
+    files = [f.strip() for f in files_raw.split(",") if f.strip()]
+    if not files:
+        return None
+    workdir = (labels.get("com.docker.compose.project.working_dir") or "").strip()
+    return {"project": project, "service": service, "files": files, "workdir": workdir}
+
+
+def run_args_from_config(config: dict[str, Any], labels: Optional[dict] = None) -> list[str]:
+    """把 inspect 快照的运行时配置映射为 docker run 参数（重建保真）。
+
+    覆盖：端口/卷挂载/网络与静态 IP/别名/hosts/dns/cap/devices/security/
+    user/workdir/hostname/tty/init/rm/log/pid/ipc/entrypoint(单项)/volumes-from。
+    """
+    args: list[str] = []
+    for k, v in (labels or {}).items():
+        args += ["-l", f"{k}={v}"]
+    for e in config.get("env") or []:
+        args += ["-e", e]
+    # 重启策略（on-failure 带重试次数）
+    _rp = config.get("restart") or "no"
+    if isinstance(_rp, dict):
+        _rn = _rp.get("Name") or "no"
+        _rc = _rp.get("MaximumRetryCount") or 0
+        _rp = f"{_rn}:{_rc}" if _rn == "on-failure" and _rc else _rn
+    if _rp and _rp != "no":
+        args += ["--restart", str(_rp)]
+    # 端口映射（PortBindings：{"80/tcp": [{HostIp, HostPort}]})
+    for port, binds in (config.get("ports") or {}).items():
+        for b in binds or [{}]:
+            hp = str((b or {}).get("HostPort") or "")
+            hip = str((b or {}).get("HostIp") or "").strip()
+            p = str(port)
+            if hip and hp:
+                args += ["-p", f"{hip}:{hp}:{p}"]
+            elif hp:
+                args += ["-p", f"{hp}:{p}"]
+            else:
+                args += ["-p", p]
+    # 卷挂载（Binds 经典式："/host:/ctr:rw"）
+    for b in config.get("binds") or []:
+        args += ["-v", b]
+    # Mounts 新式（具名卷/bind；匿名卷由镜像 VOLUME 指令自动带出，不重复声明）
+    for m in config.get("mounts") or []:
+        src = m.get("Source") or m.get("Name") or ""
+        tgt = m.get("Target") or ""
+        if not src or not tgt or tgt in {b.split(":")[1] for b in (config.get("binds") or []) if ":" in b}:
+            continue
+        spec_v = f"{src}:{tgt}"
+        if m.get("RW") is False:
+            spec_v += ":ro"
+        args += ["-v", spec_v]
+    nm = str(config.get("network_mode") or "")
+    if nm and nm not in ("bridge", "default"):
+        args += ["--network", nm]
+    for a in config.get("network_aliases") or []:
+        args += ["--network-alias", str(a)]
+    ip4 = str(config.get("ipam_v4") or "")
+    if ip4 and nm and not nm.startswith("container:"):
+        args += ["--ip", ip4]
+    for h in config.get("extra_hosts") or []:
+        args += ["--add-host", str(h)]
+    for d in config.get("dns") or []:
+        args += ["--dns", str(d)]
+    for c in config.get("cap_add") or []:
+        args += ["--cap-add", c]
+    for c in config.get("cap_drop") or []:
+        args += ["--cap-drop", c]
+    if config.get("privileged"):
+        args.append("--privileged")
+    for d in config.get("devices") or []:
+        dev = d.get("PathOnHost", "") if isinstance(d, dict) else str(d)
+        if not dev:
+            continue
+        in_c = (d.get("PathInContainer") or dev) if isinstance(d, dict) else dev
+        perms = (d.get("CgroupPermissions") or "rwm") if isinstance(d, dict) else "rwm"
+        args += ["--device", f"{dev}:{in_c}:{perms}"]
+    for s in config.get("security_opt") or []:
+        args += ["--security-opt", str(s)]
+    if config.get("user"):
+        args += ["--user", str(config["user"])]
+    if config.get("working_dir"):
+        args += ["--workdir", str(config["working_dir"])]
+    if config.get("hostname"):
+        args += ["--hostname", str(config["hostname"])]
+    if config.get("tty"):
+        args.append("-t")
+    if config.get("open_stdin"):
+        args.append("-i")
+    if config.get("init"):
+        args.append("--init")
+    if config.get("auto_remove"):
+        args.append("--rm")
+    for g in config.get("group_add") or []:
+        args += ["--group-add", str(g)]
+    if config.get("shm_size"):
+        args += ["--shm-size", str(config["shm_size"])]
+    log_type = str(config.get("log_type") or "")
+    if log_type and log_type != "json-file":  # json-file 是默认驱动，不必显式传
+        args += ["--log-driver", log_type]
+    for k, v in (config.get("log_opts") or {}).items():
+        args += ["--log-opt", f"{k}={v}"]
+    if config.get("pid_mode"):
+        args += ["--pid", str(config["pid_mode"])]
+    if config.get("ipc_mode"):
+        args += ["--ipc", str(config["ipc_mode"])]
+    ep_cmd = config.get("entrypoint") or []
+    if len(ep_cmd) == 1:  # docker run --entrypoint 仅支持单项
+        args += ["--entrypoint", str(ep_cmd[0])]
+    for vf in config.get("volumes_from") or []:
+        args += ["--volumes-from", str(vf)]
+    return args
+
+
 def _fake_digest(spec: str) -> str:
     """Mock 摘要：对引用做稳定哈希（模拟 sha256 digest）。"""
     return "sha256:" + hashlib.sha256(spec.encode()).hexdigest()
@@ -45,11 +171,11 @@ def _fake_digest(spec: str) -> str:
 class LocalDockerClient:
     """基于 docker CLI 的真实实现（JSON 输出）。"""
 
-    def _run(self, *args: str) -> str:
+    def _run(self, *args: str, timeout: int = 120) -> str:
         cmd = [CONFIG.DOCKER_BIN, *args]
         try:
             out = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120, encoding="utf-8"
+                cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8"
             )
         except FileNotFoundError as e:
             raise DockerError(f"docker binary not found: {CONFIG.DOCKER_BIN}") from e
@@ -93,6 +219,13 @@ class LocalDockerClient:
                 repo_digests = json.loads(img_raw) if img_raw.strip() else []
             except DockerError:
                 pass
+        host = data.get("HostConfig") or {}
+        cfgc = data.get("Config") or {}
+        net = data.get("NetworkSettings") or {}
+        networks = net.get("Networks") or {}
+        nm = host.get("NetworkMode") or ""
+        # 与 NetworkMode 匹配的 endpoint（静态 IP/别名）；缺省取唯一网络
+        ep = networks.get(nm) or (next(iter(networks.values())) if len(networks) == 1 else None) or {}
         return {
             "name": (data.get("Name") or "").lstrip("/"),
             "image": image_spec,
@@ -106,10 +239,38 @@ class LocalDockerClient:
             "health": health if health != "none" else "none",
             "labels": labels,
             "config": {
-                "env": (data.get("Config") or {}).get("Env") or [],
-                "cmd": (data.get("Config") or {}).get("Cmd") or [],
-                "ports": (data.get("HostConfig") or {}).get("PortBindings") or {},
-                "restart": (data.get("HostConfig") or {}).get("RestartPolicy", {}).get("Name", "no"),
+                "env": cfgc.get("Env") or [],
+                "cmd": cfgc.get("Cmd") or [],
+                "ports": host.get("PortBindings") or {},
+                "restart": (host.get("RestartPolicy") or {}).get("Name", "no"),
+                # ---- 完整运行时配置（重建保真：端口/挂载/网络等不再丢失）----
+                "binds": host.get("Binds") or [],
+                "mounts": host.get("Mounts") or [],
+                "network_mode": nm or "bridge",
+                "network_aliases": (ep.get("Aliases") or []) if isinstance(ep, dict) else [],
+                "ipam_v4": ((ep.get("IPAMConfig") or {}).get("IPv4Address") or "") if isinstance(ep, dict) else "",
+                "extra_hosts": host.get("ExtraHosts") or [],
+                "dns": host.get("Dns") or [],
+                "cap_add": host.get("CapAdd") or [],
+                "cap_drop": host.get("CapDrop") or [],
+                "privileged": bool(host.get("Privileged")),
+                "devices": host.get("Devices") or [],
+                "security_opt": host.get("SecurityOpt") or [],
+                "user": cfgc.get("User") or "",
+                "working_dir": cfgc.get("WorkingDir") or "",
+                "hostname": cfgc.get("Hostname") or "",
+                "tty": bool(cfgc.get("Tty")),
+                "open_stdin": bool(cfgc.get("OpenStdin")),
+                "init": bool(host.get("Init")),
+                "auto_remove": bool(host.get("AutoRemove")),
+                "group_add": host.get("GroupAdd") or [],
+                "shm_size": host.get("ShmSize") or 0,
+                "log_type": (host.get("LogConfig") or {}).get("Type") or "",
+                "log_opts": (host.get("LogConfig") or {}).get("Config") or {},
+                "entrypoint": cfgc.get("Entrypoint") or [],
+                "volumes_from": host.get("VolumesFrom") or [],
+                "pid_mode": host.get("PidMode") or "",
+                "ipc_mode": host.get("IpcMode") or "",
             },
         }
 
@@ -224,17 +385,25 @@ class LocalDockerClient:
 
     def create(self, name: str, image: str, config: dict[str, Any], labels: Optional[dict] = None, image_id: Optional[str] = None) -> dict[str, Any]:
         # image_id：定向用指定镜像 ID 重建（回退场景；本地 dangling 镜像仍存在时有效）
-        # 注意：_run() 会自动加 DOCKER_BIN 前缀，这里只传纯参数（曾误加导致 "docker docker run"）
+        # 重建保真：run_args_from_config 完整映射端口/挂载/网络/安全等运行时配置
         ref = image_id or image
-        cmd = ["run", "-d", "--name", name]
-        for k, v in (labels or {}).items():
-            cmd += ["-l", f"{k}={v}"]
-        for e in config.get("env", []):
-            cmd += ["-e", e]
-        policy = config.get("restart", "unless-stopped")
-        cmd += [f"--restart={policy}", ref, *config.get("cmd", [])]
+        cmd = ["run", "-d", "--name", name, *run_args_from_config(config or {}, labels), ref, *(config.get("cmd") or [])]
         self._run(*cmd)
         return self.inspect(name)
+
+    def compose_up(self, spec: dict[str, Any]) -> str:
+        """按容器标签里的 compose 项目规格重建服务（保留 compose 全部配置）。
+
+        docker pull 已把新镜像拉到本地；compose up 检测到镜像 ID 变化会自动
+        recreate 容器，端口/挂载/网络/依赖等全部按 compose 文件保留。
+        """
+        cmd = ["compose", "-p", spec["project"]]
+        for f in spec["files"]:
+            cmd += ["-f", f]
+        if spec.get("workdir"):
+            cmd += ["--project-directory", spec["workdir"]]
+        cmd += ["up", "-d", "--no-deps", spec["service"]]
+        return self._run(*cmd, timeout=300)
 
 
 class MockDockerClient:
@@ -350,6 +519,26 @@ class MockDockerClient:
         }
         self.event_log.append(f"create:{name}")
         return dict(self._containers[name])
+
+    def compose_up(self, spec: dict[str, Any]) -> str:
+        """Mock：模拟 compose up——把该项目/服务的容器重建为 pull 后的新镜像（配置保留、拉起）。"""
+        self.event_log.append(f"compose_up:{spec['project']}/{spec['service']}")
+        for n, c in self._containers.items():
+            lb = c.get("labels") or {}
+            if lb.get("com.docker.compose.project") == spec["project"] \
+                    and lb.get("com.docker.compose.service") == spec["service"]:
+                self._rebuild_count[n] = self._rebuild_count.get(n, 0) + 1
+                new_digest = self._digest_map.get(c["image"], _fake_digest(c["image"]))
+                c["image_id"] = new_digest
+                c["repo_digest"] = new_digest
+                c["running"] = True
+                # 预设的"新版本启动失败"剧本：重建后的第一次拉起 → unhealthy
+                if n in self._unhealthy_once and self._rebuild_count[n] == 1:
+                    c["health"] = "unhealthy"
+                    self.event_log.append(f"unhealthy:{n}")
+                else:
+                    c["health"] = "healthy"
+        return "mocked"
 
     def _require(self, name: str) -> None:
         if name not in self._containers:

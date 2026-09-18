@@ -69,17 +69,17 @@ class TestVersionLedger:
         assert [(v["digest"], v["source"]) for v in led] == [(D_OLD, "baseline"), (D_NEW, "update")]
 
     def test_ledger_dedup_and_prune(self, seeded, reg, monkeypatch):
-        """重复摘要不重复记录；超出 10 条裁剪最旧。"""
+        """重复摘要不重复记录；超出 30 条裁剪最旧（回退历史扩容后保留更多）。"""
         _scan(seeded, reg, monkeypatch)
         for d in [D_NEW, D_OLD, D_NEW, D_NEW2]:
             _update_to(seeded, reg, monkeypatch, d)
         led = db.query("SELECT digest FROM container_versions WHERE name='web' ORDER BY id")
         assert [v["digest"] for v in led] == [D_OLD, D_NEW, D_NEW2]
-        # 压到 10+ 条验证裁剪
-        for i in range(12):
+        # 压到 30+ 条验证裁剪
+        for i in range(30):
             engine.record_version("web", f"sha256:{str(i).zfill(64)}", SPEC, "update")
         cnt = db.query_one("SELECT COUNT(*) AS n FROM container_versions WHERE name='web'")["n"]
-        assert cnt == 10
+        assert cnt == 30
 
 
 class TestManualRollback:

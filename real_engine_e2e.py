@@ -365,6 +365,50 @@ def main() -> int:
     check("E16 记录回滚事件", any("自动回滚" in m or "已自动回滚" in m for m in msgs),
           " | ".join([m for m in msgs if "回滚" in m][:1])[:160])
 
+    # ---------- E17 compose 管理容器更新：端口/挂载/标签配置保真 ----------
+    # 用户核心场景：compose 起的容器（带端口/挂载），更新必须按 compose 重建，
+    # 不能 docker run 自行重建丢配置（曾导致容器失败）
+    import pathlib
+    yml_dir = pathlib.Path("/tmp/vt-e2e17")
+    yml_dir.mkdir(parents=True, exist_ok=True)
+    (yml_dir / "data").mkdir(exist_ok=True)
+    yml_path = yml_dir / "compose.yml"
+    yml_path.write_text(
+        "services:\n"
+        "  panel:\n"
+        f"    image: {REG}/e2e-app:v1\n"
+        "    container_name: e2e17-panel\n"
+        "    ports:\n"
+        "      - \"8391:80\"\n"
+        "    volumes:\n"
+        "      - /tmp/vt-e2e17/data:/srv/data\n"
+        "    restart: unless-stopped\n"
+    )
+    r17 = sh(f"docker compose -p vt-e2e17 -f {yml_path} up -d")
+    if r17.returncode != 0:
+        check("E17 compose up（runner 需 compose 插件）", False, r17.stderr[-160:])
+    else:
+        time.sleep(2)
+        api.scan()
+        w17 = api.get_container("e2e17-panel")
+        check("E17 compose 容器入库", w17 is not None and w17.get("compose_id") == "vt-e2e17", str(w17)[:150])
+        push_app("v1", "e17-release", version="1.3.0")
+        time.sleep(1)
+        api.scan()
+        check("E17 compose 容器标记更新", api.get_container("e2e17-panel").get("update_available") == 1)
+        st, body = c.req("POST", "/api/containers/e2e17-panel/update")
+        results = {x["name"]: x["result"] for x in body.get("containers", [])}
+        check("E17 compose 更新成功", st == 200 and results.get("e2e17-panel") == "updated", str(body)[:200])
+        ins17 = dinspect("e2e17-panel")
+        pb17 = (ins17.get("HostConfig") or {}).get("PortBindings") or {}
+        binds17 = (ins17.get("HostConfig") or {}).get("Binds") or []
+        check("E17 端口映射保留", "8391/tcp" in pb17 and (pb17["8391/tcp"] or [{}])[0].get("HostPort") == "8391", str(pb17))
+        check("E17 卷挂载保留", any("/tmp/vt-e2e17/data:/srv/data" in b for b in binds17), str(binds17))
+        check("E17 compose 标签保留", ((ins17.get("Config") or {}).get("Labels") or {}).get("com.docker.compose.project") == "vt-e2e17")
+        check("E17 重启策略保留", ((ins17.get("HostConfig") or {}).get("RestartPolicy") or {}).get("Name") == "unless-stopped")
+        check("E17 更新后容器运行中", (ins17.get("State") or {}).get("Running") is True)
+        sh(f"docker compose -p vt-e2e17 -f {yml_path} down -v")
+
     print(f"\n===== 真实引擎全场景验证：{len(PASS)} 通过 / {len(FAIL)} 失败 =====")
     if FAIL:
         for f in FAIL:

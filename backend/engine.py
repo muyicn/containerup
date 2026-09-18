@@ -18,8 +18,8 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from backend import db, notify
-from backend.docker import DockerError
-from backend.registry import parse_image_spec
+from backend.docker import DockerError, compose_spec
+from backend.registry import parse_image_spec, plausible_version, version_by_digest
 
 logger = logging.getLogger("engine")
 
@@ -331,6 +331,12 @@ class UpdateEngine:
             self._restore(name, old)
             return res
 
+        # compose 管理的容器：必须走 compose up 重建（保留端口/挂载/网络等全部 compose 配置），
+        # docker run 自行重建会丢配置导致容器失败（用户实际踩坑）
+        cspec = compose_spec(old.get("labels") or {})
+        if cspec:
+            return self._update_compose(name, old, cspec, was_running)
+
         try:
             if self.docker.exists(name):
                 self.docker.stop(name)
@@ -361,12 +367,9 @@ class UpdateEngine:
         #      按 tag 重建等于没回退 —— 必须用旧镜像 ID）----
         old_image_id = (old.get("image_id") or "") or None
         try:
-            if self.docker.exists(name):
-                self.docker.stop(name)
-                self.docker.remove(name)
-            self.docker.create(name, old_image, old_config, labels=old_labels, image_id=old_image_id)
+            self._recreate_full(name, old, image_id=old_image_id)
             if was_running:
-                self.docker.start(name)
+                self.docker.start(name) if False else None
                 if not self._wait_healthy(name):
                     res.result = "failed"
                     res.errors.append("unhealthy after rollback")
@@ -381,6 +384,158 @@ class UpdateEngine:
             res.result = "failed"
             res.errors.append(f"rollback failed: {e}")
             db.log_event("err", f"回滚失败 {name}：{e}")
+        return res
+
+    def _recreate_full(self, name: str, old: dict[str, Any], image_id: Optional[str] = None) -> None:
+        """按旧容器完整配置（env/cmd/端口/挂载/网络等）+ 指定镜像重建并启动。"""
+        if self.docker.exists(name):
+            self.docker.stop(name)
+            self.docker.remove(name)
+        self.docker.create(
+            name, old.get("image") or "", dict(old.get("config") or {}),
+            labels=_keep_container_labels(old.get("labels")), image_id=image_id,
+        )
+        self.docker.start(name)
+
+    def _update_compose(self, name: str, old: dict[str, Any], cspec: dict, was_running: bool) -> ContainerJobResult:
+        """compose 管理的容器更新：compose up 重建（配置全保留）。
+
+        前置：docker pull 已把新镜像拉到本地，compose up 检测到镜像 ID 变化自动
+        recreate。失败回滚用旧镜像 ID + 完整配置定向重建（compose 无法按 digest 定向）。
+        """
+        res = ContainerJobResult(name=name, result="failed")
+        try:
+            self.docker.compose_up(cspec)
+        except DockerError as e:
+            res.errors.append(f"compose up failed: {e}")
+            db.log_event("err", f"compose 更新失败 {name}：{e}，准备自动回滚")
+            try:
+                self._recreate_full(name, old, image_id=(old.get("image_id") or "") or None)
+                if was_running and not self._wait_healthy(name):
+                    res.result = "failed"
+                    res.errors.append("unhealthy after rollback")
+                    db.log_event("err", f"回滚后仍不健康 {name}")
+                    return res
+                res.result = "rolled_back"
+                res.errors.append("rolled back to previous image")
+                db.log_event("warn", f"已自动回滚 {name} → 旧镜像（compose 配置保真重建）")
+            except DockerError as e2:
+                res.result = "failed"
+                res.errors.append(f"rollback failed: {e2}")
+                db.log_event("err", f"回滚失败 {name}：{e2}")
+            return res
+        if not was_running:
+            # 原容器本就停止：compose up 会拉起服务，按用户意图重新停止
+            try:
+                self.docker.stop(name)
+            except DockerError:
+                pass
+            res.result = "updated"
+            db.log_event("ok", f"更新完成 {name}（compose 重建，配置保真；容器保持停止）")
+            return res
+        if not self._wait_healthy(name):
+            res.errors.append("healthcheck failed after update")
+            db.log_event("warn", f"更新后健康检查未通过 {name}，准备自动回滚")
+            try:
+                self._recreate_full(name, old, image_id=(old.get("image_id") or "") or None)
+                if not self._wait_healthy(name):
+                    res.result = "failed"
+                    res.errors.append("unhealthy after rollback")
+                    db.log_event("err", f"回滚后仍不健康 {name}")
+                    return res
+                res.result = "rolled_back"
+                res.errors.append("rolled back to previous image")
+                db.log_event("warn", f"已自动回滚 {name} → 旧镜像（compose 配置保真重建）")
+            except DockerError as e2:
+                res.result = "failed"
+                res.errors.append(f"rollback failed: {e2}")
+                db.log_event("err", f"回滚失败 {name}：{e2}")
+            return res
+        res.result = "updated"
+        new_digest = ""
+        try:
+            new_digest = (self.docker.inspect(name).get("repo_digest") or "")[:19]
+        except DockerError:
+            pass
+        db.log_event("ok", f"更新完成 {name}（compose 重建，端口/挂载/网络配置保真）→ {new_digest or cspec['service']}")
+        return res
+
+    def _recreate_full(self, name: str, old: dict[str, Any], image_id: Optional[str] = None, start: bool = True) -> None:
+        """按旧容器完整配置（env/cmd/端口/挂载/网络等，inspect 快照已全量携带）重建，可选启动。"""
+        if self.docker.exists(name):
+            self.docker.stop(name)
+            self.docker.remove(name)
+        self.docker.create(
+            name, old.get("image") or "", dict(old.get("config") or {}),
+            labels=_keep_container_labels(old.get("labels")), image_id=image_id,
+        )
+        if start:
+            self.docker.start(name)
+
+    def _update_compose(self, name: str, old: dict[str, Any], cspec: dict, was_running: bool) -> ContainerJobResult:
+        """compose 管理的容器更新：compose up 重建（配置全保留）。
+
+        前置：docker pull 已把新镜像拉到本地，compose up 检测到镜像 ID 变化自动
+        recreate，端口/挂载/网络/依赖等全部按 compose 文件保留。
+        失败回滚：compose 无法按 digest 定向 → 旧镜像 ID + 完整配置定向重建。
+        """
+        res = ContainerJobResult(name=name, result="failed")
+        try:
+            self.docker.compose_up(cspec)
+        except DockerError as e:
+            res.errors.append(f"compose up failed: {e}")
+            db.log_event("err", f"compose 更新失败 {name}：{e}，准备自动回滚")
+            try:
+                self._recreate_full(name, old, image_id=(old.get("image_id") or "") or None,
+                                    start=was_running)
+                if was_running and not self._wait_healthy(name):
+                    res.result = "failed"
+                    res.errors.append("unhealthy after rollback")
+                    db.log_event("err", f"回滚后仍不健康 {name}")
+                    return res
+                res.result = "rolled_back"
+                res.errors.append("rolled back to previous image")
+                db.log_event("warn", f"已自动回滚 {name} → 旧镜像（compose 配置保真重建）")
+            except DockerError as e2:
+                res.result = "failed"
+                res.errors.append(f"rollback failed: {e2}")
+                db.log_event("err", f"回滚失败 {name}：{e2}")
+            return res
+        if not was_running:
+            # 原容器本就停止：compose up 会拉起服务，按用户意图重新停止
+            try:
+                self.docker.stop(name)
+            except DockerError:
+                pass
+            res.result = "updated"
+            db.log_event("ok", f"更新完成 {name}（compose 重建，配置保真；容器保持停止）")
+            return res
+        if not self._wait_healthy(name):
+            res.errors.append("healthcheck failed after update")
+            db.log_event("warn", f"更新后健康检查未通过 {name}，准备自动回滚")
+            try:
+                self._recreate_full(name, old, image_id=(old.get("image_id") or "") or None,
+                                    start=was_running)
+                if not self._wait_healthy(name):
+                    res.result = "failed"
+                    res.errors.append("unhealthy after rollback")
+                    db.log_event("err", f"回滚后仍不健康 {name}")
+                    return res
+                res.result = "rolled_back"
+                res.errors.append("rolled back to previous image")
+                db.log_event("warn", f"已自动回滚 {name} → 旧镜像（compose 配置保真重建）")
+            except DockerError as e2:
+                res.result = "failed"
+                res.errors.append(f"rollback failed: {e2}")
+                db.log_event("err", f"回滚失败 {name}：{e2}")
+            return res
+        res.result = "updated"
+        new_digest = ""
+        try:
+            new_digest = (self.docker.inspect(name).get("repo_digest") or "")[:19]
+        except DockerError:
+            pass
+        db.log_event("ok", f"更新完成 {name}（compose 重建，端口/挂载/网络配置保真）→ {new_digest or cspec['service']}")
         return res
 
     def _restore(self, name: str, old: dict[str, Any]) -> None:
@@ -499,7 +654,7 @@ def record_version(name: str, digest: str, image_spec: str, source: str, job_id:
         )
         conn.execute(
             "DELETE FROM container_versions WHERE name=? AND id NOT IN "
-            "(SELECT id FROM container_versions WHERE name=? ORDER BY id DESC LIMIT 10)",
+            "(SELECT id FROM container_versions WHERE name=? ORDER BY id DESC LIMIT 30)",
             (name, name),
         )
 
@@ -533,7 +688,7 @@ def run_rollback(
 
         # 选目标：显式指定 digest → 精确匹配；否则取最近一个非当前版本
         versions = db.query(
-            "SELECT * FROM container_versions WHERE name=? ORDER BY id DESC LIMIT 10", (name,)
+            "SELECT * FROM container_versions WHERE name=? ORDER BY id DESC LIMIT 30", (name,)
         )
         target = None
         for v in versions:
@@ -585,7 +740,9 @@ def run_rollback(
         db.log_event(
             "ok",
             f"回退完成 {name}：{(target.get('version') or str(current_digest)[:19])} ← {str(current_digest)[:19]}"
-            f"（{row.get('image_spec', '')}），已自动关闭该容器的自动更新",
+            f"（{row.get('image_spec', '')}），已自动关闭该容器的自动更新"
+            + ("；compose 管理容器：按 digest 临时重建（配置保真），下次 docker compose up 将按 compose 定义恢复"
+               if compose_spec(current.get("labels") or {}) else ""),
         )
         logger.info("rolled back %s → %s（已自动关闭自动更新）", name, target["digest"][:20])
         return {
@@ -702,31 +859,48 @@ def run_update(
                     "UPDATE jobs SET status='done', result=?, finished_at=? WHERE id=?",
                     (db.jdump(payload), db.now_iso(), job_id),
                 )
-            # 成功容器清 update_available，并把本地摘要对齐到已同步版本
+            # 成功容器清 update_available，并把本地摘要/版本号对齐到已同步版本：
+            # 检测阶段已解析出目标版本号（remote_version，如 3.3.0），更新成功即本地版本 = 它；
+            # 不能只靠新镜像标签（可能没写/写分支名）——否则界面回显旧版本号（用户实际踩坑）
             for r in results:
                 if r.result == "updated":
+                    row0 = db.query_one(
+                        "SELECT remote_version FROM containers WHERE name=?", (r.name,)
+                    )
+                    rv = (row0 or {}).get("remote_version") or ""
                     with db.tx() as conn:
-                        conn.execute(
-                            "UPDATE containers SET update_available=0, updated_at=?, "
-                            "local_digest=COALESCE(remote_digest, local_digest) WHERE name=?",
-                            (db.now_iso(), r.name),
-                        )
-                    # 版本台账：记录新版本（供手动回退）；版本号取容器新镜像的 OCI 标签
+                        if plausible_version(rv):
+                            conn.execute(
+                                "UPDATE containers SET update_available=0, updated_at=?, "
+                                "local_digest=COALESCE(remote_digest, local_digest), "
+                                "local_version=?, remote_version='' WHERE name=?",
+                                (db.now_iso(), rv, r.name),
+                            )
+                        else:
+                            conn.execute(
+                                "UPDATE containers SET update_available=0, updated_at=?, "
+                                "local_digest=COALESCE(remote_digest, local_digest), "
+                                "remote_version='' WHERE name=?",
+                                (db.now_iso(), r.name),
+                            )
+                    # 版本台账：记录新版本（供手动回退）；版本号：remote 解析值 > 新镜像标签 > tags digest 匹配
                     vrow = db.query_one(
                         "SELECT local_digest, image_spec, local_version FROM containers WHERE name=?", (r.name,)
                     )
                     if vrow:
-                        new_ver = ""
-                        try:
-                            new_ver = (docker_client.inspect(r.name).get("image_version") or "")
-                        except DockerError:
-                            pass
+                        new_ver = vrow.get("local_version") or ""
+                        if not plausible_version(new_ver):
+                            try:
+                                new_ver = (docker_client.inspect(r.name).get("image_version") or "") or new_ver
+                            except DockerError:
+                                pass
+                        if not plausible_version(new_ver):
+                            try:
+                                new_ver = version_by_digest(vrow["image_spec"], vrow["local_digest"]) or new_ver
+                            except Exception:
+                                pass
                         record_version(r.name, vrow["local_digest"], vrow["image_spec"], "update", job_id,
-                                       version=new_ver or vrow.get("local_version") or "")
-                        if new_ver:
-                            with db.tx() as conn:
-                                conn.execute("UPDATE containers SET local_version=? WHERE name=?",
-                                             (new_ver, r.name))
+                                       version=new_ver)
             # 任务结果聚合通知（手动/调度共用；调度传入 trigger=auto）
             out = {"job_id": job_id, "trigger": "auto" if not manual and names is None else "manual", **payload}
             notify_job_result(out)

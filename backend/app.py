@@ -358,28 +358,28 @@ def container_versions(name: str, user: str = Depends(require_auth)) -> dict[str
         raise HTTPException(status_code=404, detail="not found")
     versions = db.query(
         "SELECT digest, image_spec, source, job_id, version, created_at FROM container_versions "
-        "WHERE name=? ORDER BY id DESC LIMIT 10",
+        "WHERE name=? ORDER BY id DESC LIMIT 30",
         (name,),
     )
     current = row["local_digest"] or ""
-    # 存量容器历史版本回填：台账只有基线时，从本地 Docker 镜像（含 dangling 旧版）挖掘补齐
+    # 存量容器历史版本回填：从本地 Docker 镜像（含 dangling 旧版）挖掘补齐
+    # （每次弹窗都试，known 去重；本地镜像已清理则无新增，代价一次 docker images 枚举）
     known = {v["digest"] for v in versions}
-    if len(versions) < 2:
-        try:
-            for iv in DOCKER.local_image_versions(row.get("image_spec", "")):
-                if iv.get("repo_digest") and iv["repo_digest"] not in known:
-                    engine.record_version(
-                        name, iv["repo_digest"], row.get("image_spec", ""), "auto",
-                        version=iv.get("version") or "",
-                    )
-                    known.add(iv["repo_digest"])
-        except Exception:
-            pass  # 回填失败不影响版本列表响应
-        versions = db.query(
-            "SELECT digest, image_spec, source, job_id, version, created_at FROM container_versions "
-            "WHERE name=? ORDER BY id DESC LIMIT 10",
-            (name,),
-        )
+    try:
+        for iv in DOCKER.local_image_versions(row.get("image_spec", "")):
+            if iv.get("repo_digest") and iv["repo_digest"] not in known:
+                engine.record_version(
+                    name, iv["repo_digest"], row.get("image_spec", ""), "auto",
+                    version=iv.get("version") or "",
+                )
+                known.add(iv["repo_digest"])
+    except Exception:
+        pass  # 回填失败不影响版本列表响应
+    versions = db.query(
+        "SELECT digest, image_spec, source, job_id, version, created_at FROM container_versions "
+        "WHERE name=? ORDER BY id DESC LIMIT 30",
+        (name,),
+    )
     # 版本号回填（best-effort）：本地版本 / 远端版本（目标版本行）
     known_versions = {
         row.get("local_version") or "": current,
