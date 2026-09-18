@@ -165,7 +165,8 @@ class RegistryClient:
     def remote_version(self, spec: str) -> str:
         """取远端镜像 config 中的版本标签（org.opencontainers.image.version 等）。
 
-        流程：GET manifest → config.digest → GET config blob → Labels。
+        流程：GET manifest（multi-arch 时按 amd64/linux 选子 manifest）
+        → config.digest → GET config blob → Labels。
         blob 常见 307 重定向到 CDN（Docker Hub）：手动跟随且不带 Authorization
         （预签名地址带 Authorization 反而会被拒）。失败一律返回空串。
         """
@@ -184,7 +185,23 @@ class RegistryClient:
         if resp.status_code != 200:
             return ""
         try:
-            cfg_digest = ((resp.json() or {}).get("config") or {}).get("digest") or ""
+            manifest = resp.json() or {}
+            # multi-arch（manifest list / image index）：按本机平台选子 manifest 再拉
+            if "manifests" in manifest:
+                target = None
+                for m in manifest.get("manifests") or []:
+                    p = m.get("platform") or {}
+                    if p.get("architecture") == "amd64" and p.get("os") == "linux":
+                        target = m
+                        break
+                if not target:
+                    return ""
+                sub_url = f"{base}/v2/{repo}/manifests/{target['digest']}"
+                sresp = client.get(sub_url, headers=headers)
+                if sresp.status_code != 200:
+                    return ""
+                manifest = sresp.json() or {}
+            cfg_digest = (manifest.get("config") or {}).get("digest") or ""
             if not cfg_digest:
                 return ""  # schemaVersion 1 或异常 manifest：无 config
             blob_url = f"{base}/v2/{repo}/blobs/{cfg_digest}"

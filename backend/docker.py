@@ -168,6 +168,49 @@ class LocalDockerClient:
             return self._run("image", "inspect", ref, "--format", "{{.Id}}").strip()
         return digest
 
+    def local_image_versions(self, repo_spec: str) -> list[dict[str, str]]:
+        """枚举本地与该镜像仓库相关的镜像（含 dangling 历史版本），供台账回填。
+
+        返回 [{repo_digest, image_id, version, created_at}]，按创建时间倒序。
+        """
+        try:
+            registry, repo, _ = parse_image_spec(repo_spec)
+        except ValueError:
+            return []
+        prefix_repo = repo if registry in {"registry-1.docker.io"} else f"{registry}/{repo}"
+        out: list[dict[str, str]] = []
+        try:
+            raw = self._run(
+                "images", "--digests", "--format",
+                "{{.Repository}}\t{{.Tag}}\t{{.Digest}}\t{{.ID}}\t{{.CreatedAt}}",
+            )
+        except DockerError:
+            return []
+        for line in raw.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 5:
+                continue
+            repository, _tag, digest, iid, created = parts
+            if repository not in (repo, prefix_repo, f"{repo.split('/')[-1]}") and repository != "<none>":
+                continue
+            if not digest or digest == "<none>" or "<none>" in iid:
+                continue
+            version = ""
+            try:
+                vraw = self._run("image", "inspect", iid, "--format",
+                                 "{{index .Config.Labels \"org.opencontainers.image.version\"}}")
+                version = (vraw or "").strip()
+                if not version or version == "<no value>":
+                    vraw2 = self._run("image", "inspect", iid, "--format",
+                                      "{{index .Config.Labels \"org.label-schema.version\"}}")
+                    version = (vraw2 or "").strip()
+                if version == "<no value>":
+                    version = ""
+            except DockerError:
+                pass
+            out.append({"repo_digest": digest, "image_id": iid, "version": version[:64], "created_at": created})
+        return out
+
     def create(self, name: str, image: str, config: dict[str, Any], labels: Optional[dict] = None, image_id: Optional[str] = None) -> dict[str, Any]:
         # image_id：定向用指定镜像 ID 重建（回退场景；本地 dangling 镜像仍存在时有效）
         # 注意：_run() 会自动加 DOCKER_BIN 前缀，这里只传纯参数（曾误加导致 "docker docker run"）
@@ -273,6 +316,10 @@ class MockDockerClient:
     def resolve_image_ref(self, repo_spec: str, digest: str) -> str:
         """Mock 无 config/manifest digest 之分，原样返回。"""
         return digest
+
+    def local_image_versions(self, repo_spec: str) -> list[dict[str, str]]:
+        """Mock：无本地镜像仓库可枚举。"""
+        return []
 
     def create(
         self, name: str, image: str, config: dict[str, Any], labels: Optional[dict] = None,

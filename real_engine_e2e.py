@@ -249,6 +249,8 @@ def main() -> int:
     # ---------- E9 手动版本回退 ----------
     st, v = c.req("GET", "/api/containers/e2e-web/versions")
     versions = v.get("versions", [])
+    check("E9 版本台账含版本号", any(x.get("version") in ("1.0.0", "1.1.0", "1.2.0") for x in versions),
+          str([{ 'digest': x['digest'][:12], 'version': x.get('version'), 'source': x['source']} for x in versions])[:200])
     target = next((x for x in reversed(versions) if x["digest"] and not x["is_current"]), None)
     if not check("E9 版本列表可选历史版本", target is not None, str(v)[:200]):
         check("E9 指定版本回退成功", False, "skipped: no target version")

@@ -345,20 +345,64 @@ def update_all(manual: bool = True, user: str = Depends(require_auth)) -> dict[s
 
 @app.get("/api/containers/{name}/versions")
 def container_versions(name: str, user: str = Depends(require_auth)) -> dict[str, Any]:
-    """版本台账：当前版本 + 历史版本（含建议回退目标）。"""
-    row = db.query_one("SELECT local_digest FROM containers WHERE name=?", (name,))
+    """版本台账：当前版本 + 历史版本（含建议回退目标）。
+
+    版本号回填：台账行缺 version 且远端可查时补齐（展示用，不阻塞响应）。
+    """
+    row = db.query_one(
+        "SELECT local_digest, local_version, remote_version, remote_digest, image_spec "
+        "FROM containers WHERE name=?",
+        (name,),
+    )
     if not row:
         raise HTTPException(status_code=404, detail="not found")
     versions = db.query(
-        "SELECT digest, image_spec, source, job_id, created_at FROM container_versions "
+        "SELECT digest, image_spec, source, job_id, version, created_at FROM container_versions "
         "WHERE name=? ORDER BY id DESC LIMIT 10",
         (name,),
     )
     current = row["local_digest"] or ""
+    # 存量容器历史版本回填：台账只有基线时，从本地 Docker 镜像（含 dangling 旧版）挖掘补齐
+    known = {v["digest"] for v in versions}
+    if len(versions) < 2:
+        try:
+            for iv in DOCKER.local_image_versions(row.get("image_spec", "")):
+                if iv.get("repo_digest") and iv["repo_digest"] not in known:
+                    engine.record_version(
+                        name, iv["repo_digest"], row.get("image_spec", ""), "auto",
+                        version=iv.get("version") or "",
+                    )
+                    known.add(iv["repo_digest"])
+        except Exception:
+            pass  # 回填失败不影响版本列表响应
+        versions = db.query(
+            "SELECT digest, image_spec, source, job_id, version, created_at FROM container_versions "
+            "WHERE name=? ORDER BY id DESC LIMIT 10",
+            (name,),
+        )
+    # 版本号回填（best-effort）：本地版本 / 远端版本（目标版本行）
+    known_versions = {
+        row.get("local_version") or "": current,
+    }
+    if row.get("remote_digest") and row.get("remote_version"):
+        known_versions.setdefault(row["remote_version"], row["remote_digest"])
+    changed = False
+    for v in versions:
+        if not v.get("version") and v.get("digest"):
+            for ver, dig in known_versions.items():
+                if ver and dig == v["digest"]:
+                    v["version"] = ver
+                    changed = True
+                    with db.tx() as conn:
+                        conn.execute(
+                            "UPDATE container_versions SET version=? WHERE name=? AND digest=?",
+                            (ver, name, v["digest"]),
+                        )
     target = next((v for v in versions if v["digest"] and v["digest"] != current), None)
     return {
         "name": name,
         "current_digest": current,
+        "current_version": row.get("local_version") or "",
         "rollback_target": target,
         "versions": [
             {**v, "is_current": v["digest"] == current} for v in versions

@@ -469,10 +469,11 @@ def notify_job_result(out: dict[str, Any]) -> None:
         )
 
 
-def record_version(name: str, digest: str, image_spec: str, source: str, job_id: Optional[int] = None) -> None:
+def record_version(name: str, digest: str, image_spec: str, source: str, job_id: Optional[int] = None, version: str = "") -> None:
     """版本台账：追加容器运行过的镜像版本（去重连续相同，每容器保留最近 10 条）。
 
     source: baseline（首次纳入监控）/ update（更新成功后的新版本）/ rollback（回退前留存）。
+    version: 镜像版本号（OCI 标签），展示用；同 digest 已存在时不覆盖。
     """
     if not digest:
         return
@@ -483,9 +484,9 @@ def record_version(name: str, digest: str, image_spec: str, source: str, job_id:
         return
     with db.tx() as conn:
         conn.execute(
-            "INSERT INTO container_versions(name, digest, image_spec, source, job_id, created_at) "
-            "VALUES(?,?,?,?,?,?)",
-            (name, digest, image_spec, source, job_id, db.now_iso()),
+            "INSERT INTO container_versions(name, digest, image_spec, source, job_id, version, created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (name, digest, image_spec, source, job_id, version or None, db.now_iso()),
         )
         conn.execute(
             "DELETE FROM container_versions WHERE name=? AND id NOT IN "
@@ -518,7 +519,8 @@ def run_rollback(
         current_digest = row.get("local_digest") or current.get("image_id") or ""
 
         # 回退前先把当前版本存进台账（避免回退后丢失当前位置）
-        record_version(name, current_digest, row.get("image_spec", ""), "rollback")
+        record_version(name, current_digest, row.get("image_spec", ""), "rollback",
+                       version=row.get("local_version") or "")
 
         # 选目标：显式指定 digest → 精确匹配；否则取最近一个非当前版本
         versions = db.query(
@@ -567,14 +569,14 @@ def run_rollback(
         # 并自动关闭该容器的自动更新开关 —— 回退是明确表态，之后由用户决定是否恢复自动
         with db.tx() as conn:
             conn.execute(
-                "UPDATE containers SET local_digest=?, update_available=0, update_enabled=0, "
+                "UPDATE containers SET local_digest=?, local_version=?, update_available=0, update_enabled=0, "
                 "updated_at=? WHERE name=?",
-                (target["digest"], db.now_iso(), name),
+                (target["digest"], target.get("version") or "", db.now_iso(), name),
             )
         db.log_event(
             "ok",
-            f"回退完成 {name}：{str(current_digest)[:19]} → {str(target['digest'])[:19]}（{row.get('image_spec', '')}），"
-            f"已自动关闭该容器的自动更新",
+            f"回退完成 {name}：{(target.get('version') or str(current_digest)[:19])} ← {str(current_digest)[:19]}"
+            f"（{row.get('image_spec', '')}），已自动关闭该容器的自动更新",
         )
         logger.info("rolled back %s → %s（已自动关闭自动更新）", name, target["digest"][:20])
         return {
@@ -582,8 +584,10 @@ def run_rollback(
             "name": name,
             "from_digest": current_digest,
             "to_digest": target["digest"],
+            "to_version": target.get("version") or "",
             "update_enabled": False,
-            "target": {"digest": target["digest"], "image_spec": target["image_spec"], "created_at": target["created_at"]},
+            "target": {"digest": target["digest"], "version": target.get("version") or "",
+                       "image_spec": target["image_spec"], "created_at": target["created_at"]},
         }
     finally:
         _UPDATE_LOCK.release()
@@ -698,12 +702,22 @@ def run_update(
                             "local_digest=COALESCE(remote_digest, local_digest) WHERE name=?",
                             (db.now_iso(), r.name),
                         )
-                    # 版本台账：记录新版本（供手动回退）
+                    # 版本台账：记录新版本（供手动回退）；版本号取容器新镜像的 OCI 标签
                     vrow = db.query_one(
-                        "SELECT local_digest, image_spec FROM containers WHERE name=?", (r.name,)
+                        "SELECT local_digest, image_spec, local_version FROM containers WHERE name=?", (r.name,)
                     )
                     if vrow:
-                        record_version(r.name, vrow["local_digest"], vrow["image_spec"], "update", job_id)
+                        new_ver = ""
+                        try:
+                            new_ver = (docker_client.inspect(r.name).get("image_version") or "")
+                        except DockerError:
+                            pass
+                        record_version(r.name, vrow["local_digest"], vrow["image_spec"], "update", job_id,
+                                       version=new_ver or vrow.get("local_version") or "")
+                        if new_ver:
+                            with db.tx() as conn:
+                                conn.execute("UPDATE containers SET local_version=? WHERE name=?",
+                                             (new_ver, r.name))
             # 任务结果聚合通知（手动/调度共用；调度传入 trigger=auto）
             out = {"job_id": job_id, "trigger": "auto" if not manual and names is None else "manual", **payload}
             notify_job_result(out)

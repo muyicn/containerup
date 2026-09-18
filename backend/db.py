@@ -79,6 +79,7 @@ def init_db() -> None:
                 image_spec TEXT NOT NULL DEFAULT '',
                 source TEXT NOT NULL DEFAULT 'update',
                 job_id INTEGER,
+                version TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_versions_name ON container_versions(name, id DESC);
@@ -141,6 +142,11 @@ def init_db() -> None:
             if col not in container_cols:
                 _CONN.execute(f"ALTER TABLE containers ADD COLUMN {col} TEXT")
                 _CONN.commit()
+        # 轻量迁移：版本台账表补 version 列
+        version_cols = {r["name"] for r in _CONN.execute("PRAGMA table_info(container_versions)").fetchall()}
+        if "version" not in version_cols:
+            _CONN.execute("ALTER TABLE container_versions ADD COLUMN version TEXT")
+            _CONN.commit()
 
 
 def get_conn() -> sqlite3.Connection:

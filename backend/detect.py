@@ -145,6 +145,8 @@ def _check_target(
     events: list[dict[str, Any]] = []
     new_digest: Optional[str] = None
     remote_version: str = ""
+    # 本地版本号（镜像 OCI 标签，_sync_containers 已写入 DB 行）
+    local_version: str = row.get("local_version") or ""
     # 首巡判定：从未成功记录过远端摘要 → 本次为基线巡检（不告警）
     first_seen = not row.get("remote_digest")
 
@@ -230,7 +232,14 @@ def _check_target(
         if first_seen and result.digest:
             from backend.engine import record_version
 
-            record_version(target, result.digest, image_spec, "baseline")
+            record_version(target, result.digest, image_spec, "baseline",
+                           version=local_version or "")
+        elif new_digest:
+            # 更新发现：台账预记远端目标版本（实际入库在更新成功后）
+            from backend.engine import record_version
+
+            record_version(target, result.digest, image_spec, "update",
+                           version=remote_version or "")
         else:
             # 非首巡且无新摘要：容器与远端一致 → 清除更新标记与远端版本；刷新远端摘要供下次 304 优化
             up_to_date = bool(local_digest and result.digest and local_digest == result.digest)

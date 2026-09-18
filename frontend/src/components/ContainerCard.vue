@@ -311,15 +311,19 @@ async function doRollback() {
       </div>
     </div>
 
-    <!-- 回退版本选择弹窗：台账全量版本任选 -->
+      <!-- 回退版本选择弹窗：台账全量版本任选（版本号优先，摘要回退） -->
     <Modal :open="rbOpen" :title="`回退版本 · ${c.name}`" @close="rbOpen = false">
       <div v-if="rbLoading" class="py-6 text-center text-xs text-slate-400">加载版本历史…</div>
       <template v-else-if="rbInfo">
         <p class="text-[12px] text-slate-500 dark:text-slate-400">
           当前运行
-          <span class="font-mono font-semibold text-slate-700 dark:text-slate-200">{{ short(rbInfo.current_digest) }}</span>
+          <span class="font-mono font-semibold text-slate-700 dark:text-slate-200">{{ rbInfo.current_version || short(rbInfo.current_digest) }}</span>
+          <span v-if="rbInfo.current_version" class="font-mono text-[10px] text-slate-400">（{{ short(rbInfo.current_digest) }}）</span>
         </p>
         <div class="mt-3 space-y-1.5 max-h-60 overflow-y-auto pr-0.5">
+          <div v-if="!rbInfo.versions?.length" class="py-4 text-center text-xs text-slate-400">
+            暂无版本历史——首次扫描建基线后，后续每次更新都会记录版本，可随时回退
+          </div>
           <button v-for="v in rbInfo.versions" :key="v.digest"
             @click="!v.is_current && (rbPick = v.digest)" :disabled="v.is_current"
             class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left transition-colors"
@@ -332,7 +336,8 @@ async function doRollback() {
               :class="rbPick === v.digest && !v.is_current ? 'border-brand-500' : 'border-slate-300 dark:border-slate-600'">
               <span v-if="rbPick === v.digest && !v.is_current" class="w-1.5 h-1.5 rounded-full bg-brand-500"></span>
             </span>
-            <span class="font-mono text-xs font-semibold text-slate-700 dark:text-slate-200">{{ short(v.digest) }}</span>
+            <span class="font-mono text-xs font-semibold text-slate-700 dark:text-slate-200">{{ v.version || short(v.digest) }}</span>
+            <span v-if="v.version" class="font-mono text-[10px] text-slate-400">{{ short(v.digest) }}</span>
             <span class="badge !text-[10px] shrink-0"
               :class="v.is_current ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-slate-500/10 text-slate-500 dark:text-slate-400'">
               {{ v.is_current ? '当前' : sourceLabel(v.source) }}
