@@ -481,6 +481,15 @@ def record_version(name: str, digest: str, image_spec: str, source: str, job_id:
         "SELECT 1 FROM container_versions WHERE name=? AND digest=?", (name, digest)
     )
     if exists:
+        # 同 digest 已存在：仅在该行缺版本号且本次有值时补齐
+        # （发现更新首记时远端版本号可能尚未拉到，下轮扫描补上后回填台账）
+        if version:
+            with db.tx() as conn:
+                conn.execute(
+                    "UPDATE container_versions SET version=? WHERE name=? AND digest=? "
+                    "AND (version IS NULL OR version='')",
+                    (version, name, digest),
+                )
         return
     with db.tx() as conn:
         conn.execute(

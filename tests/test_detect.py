@@ -84,6 +84,30 @@ class TestDetectAndNotify:
         assert row["remote_version"] == "1.1.0"
         assert row["update_available"] == 1
 
+    def test_version_refetch_when_missing(self, seeded_client, monkeypatch):
+        """版本号拉取失败可自愈：摘要未变但版本号为空 → 下轮扫描重试拉取（旧版存量数据同样受益）。"""
+        monkeypatch.setattr(detect, "make_registry_client", lambda: REGISTRY)
+        seeded_client.seed_container(
+            "ref-app", "refimg:1.0",
+            labels={"com.docker.compose.project": "rproj"},
+        )
+        REGISTRY.specs["refimg:1.0"] = {"digest": _fake_digest("refimg:1.0"), "tags": ["1.0"]}
+        scan(seeded_client)  # 基线
+        # 远端发布新版；模拟版本号拉取网络抖动失败
+        REGISTRY.specs["refimg:1.0"]["digest"] = "sha256:" + "6" * 64
+        REGISTRY.specs["refimg:1.0"]["version"] = "2.0.0"
+        monkeypatch.setattr(REGISTRY, "remote_version",
+                            lambda spec: (_ for _ in ()).throw(RuntimeError("network jitter")))
+        scan(seeded_client)
+        row = db.query_one("SELECT * FROM containers WHERE name='ref-app'")
+        assert row["update_available"] == 1
+        assert row["remote_version"] == ""
+        # 下轮扫描：摘要未变但版本号为空 → 重试拉取成功
+        monkeypatch.setattr(REGISTRY, "remote_version", lambda spec: "2.0.0")
+        scan(seeded_client)
+        row = db.query_one("SELECT * FROM containers WHERE name='ref-app'")
+        assert row["remote_version"] == "2.0.0"
+
     def test_update_alert_once_and_dedup(self, seeded_client, monkeypatch):
         """摘要变化 → update 通知一次；重复扫描同摘要不再通知（防抖）。"""
         monkeypatch.setattr(detect, "make_registry_client", lambda: REGISTRY)

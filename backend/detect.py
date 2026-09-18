@@ -155,8 +155,9 @@ def _check_target(
     # 容器运行镜像落后于上游 —— 与飞牛/Docker UI 的直觉语义一致（曾因首巡基线吞掉落后状态）
     if local_digest and result.digest and result.digest != local_digest:
         new_digest = result.digest
-        # 版本号（展示用）：仅远端摘要变化时拉取一次（同更新重复扫描复用缓存）
-        if row.get("remote_digest") != result.digest:
+        # 版本号（展示用）：远端摘要变化时拉取；摘要未变但版本号缺失（上次拉取失败/
+        # 旧版存量数据为空）时重试拉取——拉到后走缓存复用，不重复请求
+        if row.get("remote_digest") != result.digest or not row.get("remote_version"):
             fetcher = getattr(client, "remote_version", None)
             if callable(fetcher):
                 try:
