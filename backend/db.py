@@ -115,6 +115,12 @@ def init_db() -> None:
                 started_at TEXT NOT NULL,
                 finished_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS activity_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                level TEXT NOT NULL,             -- info|ok|warn|err
+                msg TEXT NOT NULL
+            );
             """
         )
         _CONN.commit()
@@ -178,6 +184,22 @@ def setting_set(key: str, value: str) -> None:
 
 def jdump(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, sort_keys=True)
+
+
+def log_event(level: str, msg: str) -> None:
+    """审计/活动日志：写入 activity_logs 表（UI 活动日志面板展示）。
+
+    轻量自裁剪：仅保留最近 500 条，避免无限增长。
+    """
+    with tx() as conn:
+        conn.execute(
+            "INSERT INTO activity_logs(ts, level, msg) VALUES(?,?,?)",
+            (now_iso(), level, msg[:500]),
+        )
+        conn.execute(
+            "DELETE FROM activity_logs WHERE id NOT IN "
+            "(SELECT id FROM activity_logs ORDER BY id DESC LIMIT 500)"
+        )
 
 
 def jload(raw: Optional[str], default: Any = None) -> Any:

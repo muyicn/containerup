@@ -339,6 +339,23 @@ def main() -> int:
     # 新容器默认不勾选自动更新（用户自选）
     check("E15 新容器默认 update_enabled=0", api.get_container("e2e-local").get("update_enabled") == 0)
 
+    # ---------- E16 活动日志：更新全生命周期审计 ----------
+    st, logs = c.req("GET", "/api/logs?limit=100")
+    msgs = [l.get("msg", "") for l in logs] if st == 200 else []
+    check("E16 日志 API 返回生命周期流", st == 200 and len(msgs) > 0, f"{len(msgs)} 条")
+    check("E16 记录「发现更新」", any("发现更新" in m and ("e2e-web" in m or "e2e-db" in m or "e2e-app" in m) for m in msgs),
+          " | ".join([m for m in msgs if "发现更新" in m][:2])[:180])
+    check("E16 记录「开始更新任务」", any("开始更新任务" in m for m in msgs),
+          " | ".join([m for m in msgs if "开始更新任务" in m][:1])[:160])
+    check("E16 记录「正在更新」", any("正在更新" in m for m in msgs),
+          " | ".join([m for m in msgs if "正在更新" in m][:1])[:160])
+    check("E16 记录「更新完成」", any("更新完成" in m for m in msgs),
+          " | ".join([m for m in msgs if "更新完成" in m][:1])[:160])
+    check("E16 记录自动调度触发", any("自动调度" in m for m in msgs),
+          " | ".join([m for m in msgs if "自动调度" in m][:1])[:160])
+    check("E16 记录回滚事件", any("自动回滚" in m or "已自动回滚" in m for m in msgs),
+          " | ".join([m for m in msgs if "回滚" in m][:1])[:160])
+
     print(f"\n===== 真实引擎全场景验证：{len(PASS)} 通过 / {len(FAIL)} 失败 =====")
     if FAIL:
         for f in FAIL:

@@ -506,6 +506,16 @@ def list_jobs(user: str = Depends(require_auth)) -> list[dict]:
     return rows
 
 
+# ---------- 活动日志（后端持久化审计流） ----------
+
+@app.get("/api/logs")
+def list_logs(user: str = Depends(require_auth), limit: int = 200) -> list[dict]:
+    """活动日志：后端生命周期事件（发现更新/任务执行/回滚等），UI 底部面板展示。"""
+    n = max(1, min(500, limit))
+    rows = db.query("SELECT * FROM activity_logs ORDER BY id DESC LIMIT ?", (n,))
+    return list(reversed(rows))
+
+
 # ---------- 设置 ----------
 
 _ALLOWED_SETTINGS = {"delay_update_sec", "scan_interval_sec", "registry_mirror", "demo_failure", "public_base_url", "health_wait_sec"}

@@ -49,10 +49,24 @@ export function resolveConfirm(val) {
 
 export function log(msg, level = 'info') {
   store.logs.push({
-    time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+    ts: new Date().toISOString(),
     msg, level,
   })
   if (store.logs.length > 300) store.logs.shift()
+}
+
+// 后端存储 UTC（ISO +00:00）→ 统一转本地时间显示
+export function fmtTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return String(iso)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+export function fmtTimeShort(iso) {
+  const full = fmtTime(iso)
+  return full ? full.slice(11) : ''
 }
 
 export function applyTheme() {

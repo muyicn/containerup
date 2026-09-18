@@ -258,6 +258,7 @@ class UpdateEngine:
                         cur = self.docker.inspect(name)
                         if snapshot[name].get("running") and not cur["running"]:
                             self.docker.start(name)
+                            db.log_event("info", f"恢复关联容器 {name}（依赖更新完毕重新启动）")
                 except DockerError as e:
                     res.errors.append(str(e))
                 results.append(res)
@@ -268,6 +269,7 @@ class UpdateEngine:
             deps = self._deps_of(name, snapshot)
             if any(d in failed_upstream for d in deps):
                 res = ContainerJobResult(name=name, result="skipped", errors=["upstream failed"])
+                db.log_event("warn", f"跳过更新 {name}：上游容器失败（失败传播）")
                 # 跳过的候选按原配置重启（保持运行，PRD 失败传播语义）
                 try:
                     if self.docker.exists(name) and snapshot[name]["running"]:
@@ -276,6 +278,11 @@ class UpdateEngine:
                     pass
                 results.append(res)
                 continue
+            db.log_event(
+                "info",
+                f"正在更新 {name}：{snapshot.get(name, {}).get('image', '?')} "
+                f"当前 {str(snapshot.get(name, {}).get('repo_digest') or snapshot.get(name, {}).get('image_id') or '?')[:19]}",
+            )
             res = self._update_one(name, snapshot.get(name))
             if res.result in ("failed", "rolled_back"):
                 failed_upstream.add(name)
@@ -307,6 +314,7 @@ class UpdateEngine:
             self.docker.pull(old_image)
         except DockerError as e:
             res.errors.append(f"pull failed: {e}")
+            db.log_event("err", f"拉取镜像失败 {name}：{old_image}（{e}），已恢复原状")
             self._restore(name, old)
             return res
 
@@ -317,15 +325,24 @@ class UpdateEngine:
             self.docker.create(name, old_image, old_config, labels=old_labels)
             if not was_running:
                 res.result = "updated"  # 原本停止 → 重建即完成
+                db.log_event("ok", f"更新完成 {name} → {old_image}（新摘要 {str(self.docker.pull(old_image))[:19]}）")
                 return res
             self.docker.start(name)
             healthy = self._wait_healthy(name)
             if healthy:
                 res.result = "updated"
+                new_digest = ""
+                try:
+                    new_digest = (self.docker.inspect(name).get("repo_digest") or "")[:19]
+                except DockerError:
+                    pass
+                db.log_event("ok", f"更新完成 {name} → 新镜像 {new_digest or old_image}，健康检查通过")
                 return res
             res.errors.append("healthcheck failed after update")
+            db.log_event("warn", f"更新后健康检查未通过 {name}，准备自动回滚")
         except DockerError as e:
             res.errors.append(str(e))
+            db.log_event("err", f"更新失败 {name}：{e}，准备自动回滚")
 
         # ---- 自动回滚：旧镜像 ID 定向重建（真实 Docker 中 pull 后 tag 已指向新镜像，
         #      按 tag 重建等于没回退 —— 必须用旧镜像 ID）----
@@ -343,9 +360,14 @@ class UpdateEngine:
                     return res
             res.result = "rolled_back"
             res.errors.append("rolled back to previous image")
+            db.log_event(
+                "warn",
+                f"已自动回滚 {name} → 旧镜像 {str(old_image_id or '')[:19]}（新版本启动失败，已恢复上一版本）",
+            )
         except DockerError as e:
             res.result = "failed"
             res.errors.append(f"rollback failed: {e}")
+            db.log_event("err", f"回滚失败 {name}：{e}")
         return res
 
     def _restore(self, name: str, old: dict[str, Any]) -> None:
@@ -536,6 +558,11 @@ def run_rollback(
                 "updated_at=? WHERE name=?",
                 (target["digest"], db.now_iso(), name),
             )
+        db.log_event(
+            "ok",
+            f"回退完成 {name}：{str(current_digest)[:19]} → {str(target['digest'])[:19]}（{row.get('image_spec', '')}），"
+            f"已自动关闭该容器的自动更新",
+        )
         logger.info("rolled back %s → %s（已自动关闭自动更新）", name, target["digest"][:20])
         return {
             "status": "ok",
@@ -626,6 +653,18 @@ def run_update(
                 (db.now_iso(),),
             )
             job_id = cur.lastrowid
+        # 审计日志：任务开始（触发方式 + 将要执行什么）
+        trigger = "手动" if (manual or names is not None) else "自动调度"
+        if plan.to_update:
+            db.log_event(
+                "info",
+                f"开始更新任务 #{job_id}（{trigger}）：将按依赖顺序更新 "
+                f"{', '.join(sorted(plan.to_update))}"
+                + (f"；关联容器 {', '.join(sorted(plan.affected))}" if plan.affected else ""),
+            )
+        else:
+            db.log_event("info", f"更新任务 #{job_id}（{trigger}）：无待更新候选"
+                + (f"，仅恢复关联容器 {', '.join(sorted(plan.affected))}" if plan.affected else ""))
         try:
             results = engine.execute(plan)
             payload = {

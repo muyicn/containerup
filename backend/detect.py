@@ -320,9 +320,23 @@ def scan(docker_client: Any, force: bool = False) -> dict[str, Any]:
                         all_events.extend(out["events"])
         finally:
             client.close()
-        # 事件聚合 + 两级通知（用 DB 行取 compose_id 做项目聚合）
-        db_rows_map = {r["name"]: r for r in db.query("SELECT * FROM containers")}
-        pushed = _emit_events(all_events, db_rows_map, force)
+            # 事件聚合 + 两级通知（用 DB 行取 compose_id 做项目聚合）
+            db_rows_map = {r["name"]: r for r in db.query("SELECT * FROM containers")}
+            # 审计日志：逐项记录发现了什么更新（UI 活动日志）
+            for ev in all_events:
+                p = ev.get("payload") or {}
+                if ev["type"] == "update":
+                    db.log_event(
+                        "warn",
+                        f"发现更新 {ev['target']}：{p.get('image', '')} "
+                        f"{str(p.get('old_digest', ''))[:19]} → {str(p.get('new_digest', ''))[:19]}",
+                    )
+                else:
+                    db.log_event(
+                        "info",
+                        f"可选新版本 {ev['target']}：{p.get('image', '')} 出现更高版本 tag {p.get('tag', '')}（需手动升级）",
+                    )
+            pushed = _emit_events(all_events, db_rows_map, force)
 
         # 纯远端监控（watches）：基线/时间线 + 哨兵通知（PRD 3.6 升级）
         # 首检基线不告警；后续摘要变化 → update 通知（同摘要一次）；

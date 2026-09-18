@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../api'
-import { toast, log, confirmDialog } from '../store'
+import { toast, log, confirmDialog, fmtTime } from '../store'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
 
@@ -212,8 +212,24 @@ async function doRollback() {
         </div>
       </div>
 
+      <!-- 有更新：当前镜像摘要 → 更新后摘要（版本号容器显示 tag 迁移） -->
+      <div v-if="c.update_available" class="text-[11px] leading-4 px-1">
+        <div class="flex items-center gap-1.5 flex-wrap">
+          <span class="text-slate-400">当前镜像</span>
+          <span class="font-mono text-slate-500 dark:text-slate-400">{{ short(c.local_digest) || '未知' }}</span>
+          <Icon name="arrowRight" cls="w-3 h-3 text-amber-500 shrink-0" />
+          <span class="text-amber-600 dark:text-amber-400">更新后</span>
+          <span class="font-mono font-semibold text-amber-700 dark:text-amber-400">{{ short(c.remote_digest) || '未知' }}</span>
+        </div>
+        <p class="mt-0.5 text-slate-400">
+          {{ tagUpgrade
+            ? `版本号 tag ${c.cur_tag} → ${c.latest_tag}（需手动升级，自动更新仅同步当前 tag 内容）`
+            : `浮动 tag ${c.cur_tag}：远端已发布新内容，${c.update_enabled ? '开启自动时将自动重建' : '需手动执行更新'}` }}
+        </p>
+      </div>
+
       <!-- 可选版本（弱化提示） -->
-      <p v-if="hasNewer && !tagUpgrade" class="text-[11px] leading-4 text-slate-400 px-1">
+      <p v-if="hasNewer && !tagUpgrade && !c.update_available" class="text-[11px] leading-4 text-slate-400 px-1">
         仓库另有可选版本 <span class="font-mono text-slate-500 dark:text-slate-400">{{ (c.newer_tags || []).slice(0, 3).join(' / ') }}</span>（需手动升级）
       </p>
 
@@ -317,7 +333,7 @@ async function doRollback() {
               :class="v.is_current ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-slate-500/10 text-slate-500 dark:text-slate-400'">
               {{ v.is_current ? '当前' : sourceLabel(v.source) }}
             </span>
-            <span class="ml-auto text-[10.5px] font-mono text-slate-400 shrink-0">{{ v.created_at?.slice(5, 16).replace('T', ' ') }}</span>
+            <span class="ml-auto text-[10.5px] font-mono text-slate-400 shrink-0">{{ fmtTime(v.created_at) }}</span>
           </button>
         </div>
         <p class="mt-3 text-[11px] leading-4 text-amber-600 dark:text-amber-400 flex items-start gap-1.5">

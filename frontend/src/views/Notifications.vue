@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, ref, computed } from 'vue'
-import { toast, log, confirmDialog } from '../store'
+import { toast, log, confirmDialog, fmtTime } from '../store'
 import { api } from '../api'
 import Icon from '../components/Icon.vue'
 
@@ -93,7 +93,7 @@ onMounted(load)
         <span class="badge shrink-0 mt-0.5" :class="typeMeta[n.type]?.cls">{{ typeMeta[n.type]?.t || n.type }}</span>
         <div class="min-w-0 flex-1">
           <p class="text-[13.5px] leading-6 text-slate-700 dark:text-slate-200 break-all">{{ descOf(n) }}</p>
-          <p class="mt-1 text-[11px] text-slate-400 font-mono">{{ n.created_at?.slice(0, 19).replace('T', ' ') }}</p>
+          <p class="mt-1 text-[11px] text-slate-400 font-mono">{{ fmtTime(n.created_at) }}</p>
         </div>
         <button v-if="!n.read_at" @click="readOne(n.id)" class="btn-ghost !px-2.5 !py-1 !text-[11px] shrink-0">标记已读</button>
         <Icon v-else name="check" cls="w-4 h-4 text-emerald-400 shrink-0 mt-1" />

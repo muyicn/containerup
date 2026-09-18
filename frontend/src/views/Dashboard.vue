@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
-import { store, toast, log, goPage, confirmDialog } from '../store'
+import { store, toast, log, goPage, confirmDialog, fmtTime } from '../store'
 import { api } from '../api'
 import StatCard from '../components/StatCard.vue'
 import Icon from '../components/Icon.vue'
@@ -156,7 +156,7 @@ defineExpose({ load })
           <div class="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60">
             <Icon name="clock" cls="w-3.5 h-3.5 text-slate-400" />
             <span class="text-slate-500">上次扫描</span>
-            <span class="ml-auto text-slate-500 font-mono">{{ s.latest_scan?.finished_at?.slice(0, 19).replace('T', ' ') || '暂未扫描' }}</span>
+            <span class="ml-auto text-slate-500 font-mono">{{ s.latest_scan?.finished_at ? fmtTime(s.latest_scan.finished_at) : '暂未扫描' }}</span>
           </div>
           <div class="px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 text-slate-500">
             {{ scanSummaryText() }}

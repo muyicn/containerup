@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
-import { toast, log, confirmDialog } from '../store'
+import { toast, log, confirmDialog, fmtTime } from '../store'
 import { api } from '../api'
 import Icon from '../components/Icon.vue'
 
@@ -77,7 +77,7 @@ onMounted(load)
             <span v-if="w.newer_tags?.length" class="text-sky-600 dark:text-sky-400 font-sans">
               可用新版本：{{ w.newer_tags.join('、') }}
             </span>
-            <span v-if="w.last_checked_at">最近检查 {{ w.last_checked_at.slice(0, 19).replace('T', ' ') }}</span>
+            <span v-if="w.last_checked_at">最近检查 {{ fmtTime(w.last_checked_at) }}</span>
             <span v-else>等待下轮扫描</span>
           </div>
         </div>

@@ -84,8 +84,15 @@ def _run_cycle() -> None:
     try:
         scan_out = detect.scan(get(), force=False)
         result["scan"] = scan_out
+        # 审计日志：自动轮次扫描结果（有发现时记详细，无发现不刷屏）
+        if scan_out.get("events"):
+            db.log_event(
+                "info",
+                f"自动调度扫描：发现 {scan_out['events']} 项更新，检查 {scan_out.get('checked', 0)} 个容器",
+            )
         # 仅当"自动模式候选就绪"才执行更新：避免无候选周期产生空任务
         if engine.auto_update_pending(get()):
+            db.log_event("info", "自动调度：存在就绪候选，即将自动执行更新")
             out = engine.run_update(get(), manual=False)
             if out.get("status") == "update already running":
                 result["update"] = "busy"  # 手动更新进行中 → 本轮让行
