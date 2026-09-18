@@ -33,7 +33,7 @@ def fresh_db():
                 """
                 DROP TABLE IF EXISTS settings; DROP TABLE IF EXISTS containers;
                 DROP TABLE IF EXISTS watches; DROP TABLE IF EXISTS notifications;
-                DROP TABLE IF EXISTS container_versions;
+                DROP TABLE IF EXISTS container_versions; DROP TABLE IF EXISTS tag_version_cache;
                 DROP TABLE IF EXISTS channels; DROP TABLE IF EXISTS users;
                 DROP TABLE IF EXISTS scans; DROP TABLE IF EXISTS jobs;
                 """

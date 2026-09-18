@@ -124,6 +124,13 @@ def init_db() -> None:
                 level TEXT NOT NULL,             -- info|ok|warn|err
                 msg TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS tag_version_cache (
+                repo TEXT NOT NULL,              -- GitHub owner/repo
+                revision TEXT NOT NULL,          -- 构建 commit sha
+                version TEXT NOT NULL DEFAULT '',-- 命中的 tag 名；空串=确认无匹配（防重查）
+                updated_at TEXT,
+                PRIMARY KEY(repo, revision)
+            );
             """
         )
         _CONN.commit()

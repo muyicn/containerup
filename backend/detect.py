@@ -14,7 +14,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
-from backend import db, notify
+from backend import db, notify, github_versions
 from backend.config import CONFIG
 from backend.engine import (
     COMPOSE_PROJECT_LABEL,
@@ -133,6 +133,7 @@ def _check_target(
     mode_override: str,
     local_digest: Optional[str],
     force: bool,
+    labels: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     """检查单个目标，返回事件明细。不直接发通知（由调用方聚合）。
 
@@ -147,6 +148,20 @@ def _check_target(
     remote_version: str = ""
     # 本地版本号（镜像 OCI 标签，_sync_containers 已写入 DB 行）
     local_version: str = row.get("local_version") or ""
+    # 版本号溯源：标签值不像版本号（空/main 这类分支名）时，用镜像标注的
+    # 源码仓库 + 构建 commit 到 GitHub 反查对应 tag（如 v2.2.0）。
+    # 持久缓存下首轮后零外呼；查到后写回 DB 供前端展示与台账记录。
+    if not github_versions.plausible_version(local_version):
+        gh = github_versions.version_for_revision(
+            (labels or {}).get("org.opencontainers.image.source"),
+            (labels or {}).get("org.opencontainers.image.revision"),
+        )
+        if gh and gh != local_version:
+            local_version = gh
+            with db.tx() as conn:
+                conn.execute(
+                    "UPDATE containers SET local_version=? WHERE name=?", (gh, target)
+                )
     # 首巡判定：从未成功记录过远端摘要 → 本次为基线巡检（不告警）
     first_seen = not row.get("remote_digest")
 
@@ -311,6 +326,8 @@ def scan(docker_client: Any, force: bool = False) -> dict[str, Any]:
 
             def _do(row: dict[str, Any]) -> tuple[Optional[dict[str, Any]], Optional[tuple[str, str]]]:
                 try:
+                    # 运行时快照里的镜像 Labels（含 source/revision 标注）供版本号溯源
+                    rt = containers_map.get(row["name"]) or {}
                     out = _check_target(
                         client,
                         row["name"],
@@ -319,6 +336,7 @@ def scan(docker_client: Any, force: bool = False) -> dict[str, Any]:
                         row["mode"],
                         row["local_digest"],
                         force,
+                        labels=rt.get("labels") or {},
                     )
                     return out, None
                 except Exception as e:  # 单容器失败不阻断扫描

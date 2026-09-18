@@ -19,6 +19,7 @@ from urllib.parse import urlencode, urlparse
 
 import httpx
 
+from backend import github_versions
 from backend.config import CONFIG
 
 FLOATING_TAGS = {"latest", "nightly", "dev", "canary", "beta", "edge", "stable", "master", "main", "test"}
@@ -213,10 +214,9 @@ class RegistryClient:
             if bresp.status_code != 200:
                 return ""
             labels = ((bresp.json() or {}).get("config") or {}).get("Labels") or {}
-            for key in self._VERSION_LABELS:
-                v = labels.get(key)
-                if v:
-                    return str(v)[:64]
+            # 版本标签像版本号直接用；值是分支名（main 等）或缺失时，
+            # 用 source+revision 标注溯源 GitHub tag（持久缓存）
+            return github_versions.resolve_version(labels)
         except Exception:
             return ""
         return ""

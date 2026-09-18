@@ -197,15 +197,29 @@ class LocalDockerClient:
                 continue
             version = ""
             try:
+                # 一次读 4 个标注：版本标签 ×2 + 溯源标注（source/revision）×2
                 vraw = self._run("image", "inspect", iid, "--format",
-                                 "{{index .Config.Labels \"org.opencontainers.image.version\"}}")
-                version = (vraw or "").strip()
-                if not version or version == "<no value>":
-                    vraw2 = self._run("image", "inspect", iid, "--format",
-                                      "{{index .Config.Labels \"org.label-schema.version\"}}")
-                    version = (vraw2 or "").strip()
-                if version == "<no value>":
-                    version = ""
+                                 '{{index .Config.Labels "org.opencontainers.image.version"}}'
+                                 '\t{{index .Config.Labels "org.label-schema.version"}}'
+                                 '\t{{index .Config.Labels "org.opencontainers.image.source"}}'
+                                 '\t{{index .Config.Labels "org.opencontainers.image.revision"}}')
+                fields = (vraw or "").split("\t")
+
+                def _lab(i: int) -> str:
+                    if len(fields) <= i:
+                        return ""
+                    v = fields[i].strip()
+                    return "" if v in ("", "<no value>") else v
+
+                # 版本标签像版本号直接用；否则 source+revision 溯源 GitHub tag（有持久缓存）
+                from backend import github_versions
+
+                version = github_versions.resolve_version({
+                    "org.opencontainers.image.version": _lab(0),
+                    "org.label-schema.version": _lab(1),
+                    "org.opencontainers.image.source": _lab(2),
+                    "org.opencontainers.image.revision": _lab(3),
+                })
             except DockerError:
                 pass
             out.append({"repo_digest": digest, "image_id": iid, "version": version[:64], "created_at": created})
