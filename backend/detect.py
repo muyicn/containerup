@@ -93,9 +93,9 @@ def _sync_containers(docker_client: Any) -> dict[str, dict[str, Any]]:
         service = get_service_name(c) or ""
         protected = 1 if labels.get(PROTECTED_LABEL, "").lower() == "true" else 0
         image_spec = c.get("image", "")
-        # 容器 Config.Image 可能退化为镜像 ID（回滚按 ID 重建后）；
-        # 检测必须用 tag 引用 → 保留 DB 里原有 image_spec，不用 sha256: 引用覆盖
-        if image_spec.startswith("sha256:"):
+        # 容器 Config.Image 可能退化为镜像 ID 或 tag@digest 引用（回退定向重建后）；
+        # 检测必须用 tag 引用 → 保留 DB 里原有 image_spec，不用这类引用覆盖
+        if image_spec.startswith("sha256:") or "@" in image_spec:
             prev = db.query_one("SELECT image_spec FROM containers WHERE name=?", (name,))
             if prev and prev["image_spec"] and not prev["image_spec"].startswith("sha256:"):
                 image_spec = prev["image_spec"]

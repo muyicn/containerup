@@ -362,8 +362,11 @@ class LocalDockerClient:
         try:
             self._run("rmi", f"{prefix}{repo}@{digest}")
             return True
-        except DockerError:
-            return False  # 被其他容器引用或已删除：忽略
+        except DockerError as e:
+            # 被其他容器引用/已删除等：记录原因便于诊断，安全忽略
+            logging.getLogger("docker").info(
+                "rmi %s%s@%s skipped: %s", prefix, repo, digest[:20], e)
+            return False
 
     def local_image_versions(self, repo_spec: str) -> list[dict[str, str]]:
         """枚举本地与该镜像仓库相关的镜像（含 dangling 历史版本），供台账回填。
