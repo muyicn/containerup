@@ -301,6 +301,8 @@ def main() -> int:
 
     # ---------- E14 调度器自动扫描 + 自动更新 ----------
     st, _ = c.req("PUT", "/api/containers/e2e-db/ignored", {"value": False})
+    # 新容器默认不自动更新（用户自选）；模拟用户开启 e2e-db 的自动开关
+    c.req("PUT", "/api/containers/e2e-db/update_enabled", {"value": True})
     push_db("v1", "fourth-release")
     time.sleep(1)
     api.scan()
@@ -323,6 +325,19 @@ def main() -> int:
     check("E14 自动更新真实执行（e2e-db updated）", auto_hit, str(jobs[:1])[:200])
     check("E14 自动更新后标记清除", api.get_container("e2e-db").get("update_available") == 0)
     api.settings({"scan_interval_sec": "0", "health_wait_sec": "0"})
+
+    # ---------- E15 本地导入镜像识别（docker load + run 场景） ----------
+    # 构建不推送的镜像直接运行（无 RepoDigests + 远端不存在）→ 不报错、标记 local_image
+    sh_ok("docker build -q -t sms-local-hub:latest -f e2e/Dockerfile.app e2e/")
+    sh_ok("docker run -d --name e2e-local sms-local-hub:latest")
+    time.sleep(1)
+    s15 = api.scan()
+    local_row = api.get_container("e2e-local")
+    check("E15 本地镜像不报检测错误", s15.get("errors", 0) == 0, f"scan={ {k: s15.get(k) for k in ('checked', 'errors')} } err={s15.get('errors_detail')}")
+    check("E15 本地镜像标记 local_image=1", local_row.get("local_image") == 1, str({k: local_row.get(k) for k in ('name', 'local_image', 'update_available')})[:150])
+    check("E15 本地镜像不标记更新", local_row.get("update_available") == 0)
+    # 新容器默认不勾选自动更新（用户自选）
+    check("E15 新容器默认 update_enabled=0", api.get_container("e2e-local").get("update_enabled") == 0)
 
     print(f"\n===== 真实引擎全场景验证：{len(PASS)} 通过 / {len(FAIL)} 失败 =====")
     if FAIL:

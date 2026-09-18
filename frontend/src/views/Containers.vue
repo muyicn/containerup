@@ -9,6 +9,8 @@ const containers = ref([])
 const filter = ref('all')
 const keyword = ref('')
 const loading = ref(false)
+const schedEnabled = ref(true)
+const hasAutoContainers = computed(() => containers.value.some(c => c.update_enabled && !c.ignored && !c.protected))
 
 const FILTERS = [
   { v: 'all', t: '全部' },
@@ -33,6 +35,8 @@ async function load() {
   loading.value = true
   try {
     containers.value = await api('/containers')
+    const sched = await api('/scheduler').catch(() => null)
+    if (sched) schedEnabled.value = !!sched.enabled
   } catch (e) { toast(e.message, true) }
   finally { loading.value = false }
 }
@@ -58,12 +62,18 @@ onUnmounted(() => window.removeEventListener('vt-filter', onVtFilter))
     </div>
 
     <!-- 工具条 -->
-    <div class="flex items-center gap-2 flex-wrap mb-5">
+    <div class="flex items-center gap-2 flex-wrap mb-3">
       <button v-for="f in FILTERS" :key="f.v" @click="filter = f.v" :class="filter === f.v ? 'chip-on' : 'chip'">{{ f.t }}</button>
       <span class="flex-1 min-w-[140px] max-w-xs relative">
         <Icon name="eye" cls="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
         <input v-model="keyword" class="input !pl-9" placeholder="搜索容器 / 镜像…" />
       </span>
+    </div>
+
+    <!-- 调度停用提示：勾了「自动」但全局自动调度未开启 → 自动更新不会执行 -->
+    <div v-if="!schedEnabled && hasAutoContainers"
+      class="mb-5 px-4 py-2.5 rounded-xl bg-amber-50 dark:bg-amber-500/10 border border-amber-200/60 dark:border-amber-500/20 text-xs text-amber-600 dark:text-amber-400">
+      已有容器开启「自动」开关，但全局自动调度未开启 —— 自动更新不会执行。请到「设置」页将自动检测间隔设为大于 0（如 3600 秒）。
     </div>
 
     <!-- 卡片流：统一列高，卡片内部 flex 保证操作区贴底 -->

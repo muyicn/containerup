@@ -41,10 +41,15 @@ def _scan(d: MockDockerClient, reg: StaticRegistrySource, monkeypatch) -> None:
 
 
 def _update_to(seeded, reg, monkeypatch, digest):
-    """驱动一次完整更新：改注册表摘要 + docker pull 结果 → 扫描 → 更新。"""
+    """驱动一次完整更新：改注册表摘要 + docker pull 结果 → 扫描 → 更新。
+
+    新容器默认不自动更新（用户自选）；本 helper 模拟用户已开启自动更新。
+    """
     reg.specs[SPEC]["digest"] = digest
     seeded.set_digest(SPEC, digest)
     _scan(seeded, reg, monkeypatch)
+    with db.tx() as conn:
+        conn.execute("UPDATE containers SET update_enabled=1 WHERE name='web'")
     out = engine.run_update(seeded, manual=False)
     assert out["containers"][0]["result"] == "updated"
     return out
@@ -168,6 +173,8 @@ class TestAutoRollbackImageId:
         reg.specs[SPEC]["digest"] = D_NEW
         seeded.set_digest(SPEC, D_NEW)
         _scan(seeded, reg, monkeypatch)
+        with db.tx() as conn:
+            conn.execute("UPDATE containers SET update_enabled=1 WHERE name='web'")
         out = engine.run_update(seeded, manual=False)
         r = out["containers"][0]
         assert r["result"] == "rolled_back"
@@ -203,6 +210,8 @@ class TestRollbackAPI:
         reg.specs[SPEC]["digest"] = D_NEW
         d.set_digest(SPEC, D_NEW)
         detect_mod.scan(d)
+        with db.tx() as conn:
+            conn.execute("UPDATE containers SET update_enabled=1 WHERE name='web'")
         engine.run_update(d, manual=False)
         # 版本列表
         r = tc.get("/api/containers/web/versions")

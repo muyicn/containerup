@@ -82,15 +82,21 @@ def _sync_containers(docker_client: Any) -> dict[str, dict[str, Any]]:
         service = get_service_name(c) or ""
         protected = 1 if labels.get(PROTECTED_LABEL, "").lower() == "true" else 0
         image_spec = c.get("image", "")
+        # 容器 Config.Image 可能退化为镜像 ID（回滚按 ID 重建后）；
+        # 检测必须用 tag 引用 → 保留 DB 里原有 image_spec，不用 sha256: 引用覆盖
+        if image_spec.startswith("sha256:"):
+            prev = db.query_one("SELECT image_spec FROM containers WHERE name=?", (name,))
+            if prev and prev["image_spec"] and not prev["image_spec"].startswith("sha256:"):
+                image_spec = prev["image_spec"]
         # 更新对比口径：manifest 摘要（pull 时记录的 RepoDigests），与 registry 检测同口径；
-        # 本地构建镜像无 RepoDigests → 置空（首巡仅建基线，不做 digest 对比）
+        # 本地构建/导入镜像无 RepoDigests → 置空（首巡仅建基线，不做 digest 对比）
         repo_digest = c.get("repo_digest") or ""
         with db.tx() as conn:
             conn.execute(
                 """
                 INSERT INTO containers(name, image_spec, compose_id, service, mode,
                     check_enabled, update_enabled, protected, local_digest)
-                VALUES(?,?,?,?,?,1,1,?,?)
+                VALUES(?,?,?,?,?,1,0,?,?)
                 ON CONFLICT(name) DO UPDATE SET
                     image_spec=excluded.image_spec,
                     compose_id=excluded.compose_id,
@@ -177,7 +183,7 @@ def _check_target(
         if new_digest:
             # 检测到更新：记远端摘要、标记可更新；local_digest 保持容器实际值（_sync_containers 已写入）
             conn.execute(
-                "UPDATE containers SET remote_digest=?, update_available=1, "
+                "UPDATE containers SET remote_digest=?, update_available=1, local_image=0, "
                 "remote_changed_at=COALESCE(remote_changed_at,?), last_checked_at=?, newer_tags=? "
                 "WHERE name=?",
                 (result.digest, changed_now, changed_now, db.jdump(merged_seen), target),
@@ -190,7 +196,7 @@ def _check_target(
                 "UPDATE containers SET "
                 "local_digest=CASE WHEN local_digest IS NULL OR local_digest='' "
                 "THEN ? ELSE local_digest END, "
-                "remote_digest=?, last_checked_at=?, newer_tags=? WHERE name=?",
+                "remote_digest=?, local_image=0, last_checked_at=?, newer_tags=? WHERE name=?",
                 (result.digest, result.digest, changed_now, db.jdump(merged_seen), target),
             )
         elif first_seen:
@@ -207,7 +213,7 @@ def _check_target(
         else:
             # 非首巡且无新摘要：容器与远端一致 → 清除更新标记；刷新远端摘要供下次 304 优化
             up_to_date = bool(local_digest and result.digest and local_digest == result.digest)
-            sets = "last_checked_at=?, newer_tags=?, remote_digest=?"
+            sets = "last_checked_at=?, newer_tags=?, remote_digest=?, local_image=0"
             params: list = [changed_now, db.jdump(merged_seen), result.digest]
             if up_to_date:
                 sets += ", update_available=0"
@@ -285,16 +291,30 @@ def scan(docker_client: Any, force: bool = False) -> dict[str, Any]:
                     )
                     return out, None
                 except Exception as e:  # 单容器失败不阻断扫描
+                    msg = str(e)
+                    # 本地导入/构建镜像（无 RepoDigests）在公共 registry 不存在（401/404）
+                    # → 非错误：标记 local_image，跳过更新检测（镜像推送后自动恢复跟踪）
+                    if not row.get("local_digest") and ("returned 401" in msg or "returned 404" in msg):
+                        logger.info("local image %s: not found on registry, skip (%s)", row["name"], msg)
+                        return None, ("__local__", row["name"])
                     logger.warning("check failed for %s: %s", row["name"], e)
-                    return None, (row["name"], str(e)[:200])
+                    return None, (row["name"], msg[:200])
 
             # 并发检测：瓶颈是 registry 网络往返，线程池 8 并发把逐容器串行等待压缩为批次
             workers = max(1, min(8, len(targets)))
             with ThreadPoolExecutor(max_workers=workers) as ex:
                 for out, failed in ex.map(_do, targets):
                     if failed:
-                        errors += 1
-                        error_details.append({"name": failed[0], "error": failed[1]})
+                        if failed[0] == "__local__":
+                            # 本地镜像：置标记、不算错误；远端可用时扫描会自动清除
+                            with db.tx() as conn:
+                                conn.execute(
+                                    "UPDATE containers SET local_image=1, update_available=0 WHERE name=?",
+                                    (failed[1],),
+                                )
+                        else:
+                            errors += 1
+                            error_details.append({"name": failed[0], "error": failed[1]})
                     else:
                         checked += 1
                         all_events.extend(out["events"])

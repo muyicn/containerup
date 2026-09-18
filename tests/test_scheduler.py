@@ -56,7 +56,7 @@ def test_auto_update_pending_filters():
                 tuple(kw.values()),
             )
 
-    set_flag(update_available=1)
+    set_flag(update_available=1, update_enabled=1)
     assert engine.auto_update_pending(docker) is True
 
     set_flag(ignored=1)
@@ -89,6 +89,12 @@ def test_hot_reload_then_full_auto_cycle(monkeypatch):
         "nginx:1.25-alpine": {"digest": DIGEST_OLD, "tags": ["1.25-alpine"]},
     })
     monkeypatch.setattr("backend.detect.make_registry_client", lambda: REGISTRY)
+    # 用户显式开启该容器的自动更新（新容器默认关闭）
+    db.setting_set("scan_interval_sec", "0")
+    with db.tx() as conn:
+        conn.execute("INSERT INTO containers(name, image_spec, update_enabled) "
+                     "VALUES('web','nginx:1.25-alpine',1) "
+                     "ON CONFLICT(name) DO UPDATE SET update_enabled=1")
 
     # 挂起态启动（未配置间隔）
     scheduler.start(lambda: docker)

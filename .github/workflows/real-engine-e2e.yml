@@ -77,5 +77,5 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          docker rm -f e2e-web e2e-db e2e-pin e2e-prot e2e-ign vt-e2e e2e-registry || true
+          docker rm -f e2e-web e2e-db e2e-pin e2e-prot e2e-ign e2e-local vt-e2e e2e-registry || true
           docker volume rm vt-e2e-data || true

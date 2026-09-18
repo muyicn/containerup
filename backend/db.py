@@ -46,7 +46,7 @@ def init_db() -> None:
                 service TEXT,
                 mode TEXT NOT NULL DEFAULT 'auto',
                 check_enabled INTEGER NOT NULL DEFAULT 1,
-                update_enabled INTEGER NOT NULL DEFAULT 1,
+                update_enabled INTEGER NOT NULL DEFAULT 0,
                 ignored INTEGER NOT NULL DEFAULT 0,
                 freeze INTEGER NOT NULL DEFAULT 0,
                 local_digest TEXT,
@@ -57,6 +57,7 @@ def init_db() -> None:
                 remote_changed_at TEXT,
                 delay_update_for INTEGER,
                 updated_at TEXT,
+                local_image INTEGER NOT NULL DEFAULT 0,
                 protected INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS watches (
@@ -121,6 +122,11 @@ def init_db() -> None:
         watch_cols = {r["name"] for r in _CONN.execute("PRAGMA table_info(watches)").fetchall()}
         if "newer_tags" not in watch_cols:
             _CONN.execute("ALTER TABLE watches ADD COLUMN newer_tags TEXT NOT NULL DEFAULT '[]'")
+            _CONN.commit()
+        # 轻量迁移：旧库 containers 表补 local_image 列（本地导入镜像标记）
+        container_cols = {r["name"] for r in _CONN.execute("PRAGMA table_info(containers)").fetchall()}
+        if "local_image" not in container_cols:
+            _CONN.execute("ALTER TABLE containers ADD COLUMN local_image INTEGER NOT NULL DEFAULT 0")
             _CONN.commit()
 
 

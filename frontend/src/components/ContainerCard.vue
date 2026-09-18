@@ -60,6 +60,9 @@ const effectHint = computed(() => {
   if (props.c.ignored) {
     return { icon: 'eye', text: '已忽略 — 不再检测与更新', cls: 'text-slate-400' }
   }
+  if (props.c.local_image) {
+    return { icon: 'cube', text: '本地镜像 — 无远端仓库记录，跳过更新检测（镜像推送后自动恢复）', cls: 'text-slate-400' }
+  }
   if (props.c.protected) {
     return { icon: 'lock', text: '受保护 — 平台不自动更新，仅提醒', cls: 'text-sky-500' }
   }
