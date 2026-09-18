@@ -51,6 +51,8 @@ def init_db() -> None:
                 freeze INTEGER NOT NULL DEFAULT 0,
                 local_digest TEXT,
                 remote_digest TEXT,
+                local_version TEXT,
+                remote_version TEXT,
                 update_available INTEGER NOT NULL DEFAULT 0,
                 newer_tags TEXT NOT NULL DEFAULT '[]',
                 last_checked_at TEXT,
@@ -134,6 +136,11 @@ def init_db() -> None:
         if "local_image" not in container_cols:
             _CONN.execute("ALTER TABLE containers ADD COLUMN local_image INTEGER NOT NULL DEFAULT 0")
             _CONN.commit()
+        # 轻量迁移：版本号列（镜像 OCI 标签里的版本，展示用）
+        for col in ("local_version", "remote_version"):
+            if col not in container_cols:
+                _CONN.execute(f"ALTER TABLE containers ADD COLUMN {col} TEXT")
+                _CONN.commit()
 
 
 def get_conn() -> sqlite3.Connection:

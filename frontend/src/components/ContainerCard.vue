@@ -212,19 +212,23 @@ async function doRollback() {
         </div>
       </div>
 
-      <!-- 有更新：当前镜像摘要 → 更新后摘要（版本号容器显示 tag 迁移） -->
+      <!-- 有更新：当前版本 → 更新后版本（版本号优先，无版本标签时回退镜像摘要） -->
       <div v-if="c.update_available" class="text-[11px] leading-4 px-1">
         <div class="flex items-center gap-1.5 flex-wrap">
-          <span class="text-slate-400">当前镜像</span>
-          <span class="font-mono text-slate-500 dark:text-slate-400">{{ short(c.local_digest) || '未知' }}</span>
+          <span class="text-slate-400">当前版本</span>
+          <span class="font-mono font-semibold text-slate-600 dark:text-slate-300">{{ c.local_version || short(c.local_digest) || '未知' }}</span>
+          <span v-if="c.local_version && c.local_digest" class="font-mono text-[10px] text-slate-400">{{ short(c.local_digest) }}</span>
           <Icon name="arrowRight" cls="w-3 h-3 text-amber-500 shrink-0" />
           <span class="text-amber-600 dark:text-amber-400">更新后</span>
-          <span class="font-mono font-semibold text-amber-700 dark:text-amber-400">{{ short(c.remote_digest) || '未知' }}</span>
+          <span class="font-mono font-bold text-amber-700 dark:text-amber-400">{{ c.remote_version || short(c.remote_digest) || '未知' }}</span>
+          <span v-if="c.remote_version && c.remote_digest" class="font-mono text-[10px] text-slate-400">{{ short(c.remote_digest) }}</span>
         </div>
         <p class="mt-0.5 text-slate-400">
           {{ tagUpgrade
             ? `版本号 tag ${c.cur_tag} → ${c.latest_tag}（需手动升级，自动更新仅同步当前 tag 内容）`
-            : `浮动 tag ${c.cur_tag}：远端已发布新内容，${c.update_enabled ? '开启自动时将自动重建' : '需手动执行更新'}` }}
+            : c.local_version || c.remote_version
+              ? `浮动 tag ${c.cur_tag}：远端已发布新内容，${c.update_enabled ? '开启自动时将自动重建' : '需手动执行更新'}`
+              : `镜像 ${c.cur_tag} 内容已更新（该镜像未标注版本号，摘要即版本），${c.update_enabled ? '开启自动时将自动重建' : '需手动执行更新'}` }}
         </p>
       </div>
 

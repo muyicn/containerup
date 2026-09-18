@@ -159,6 +159,51 @@ class RegistryClient:
                 newer = []
         return RegistryResult(digest=digest, newer_tags=newer)
 
+    # 版本标签（OCI 标准 + label-schema 约定）
+    _VERSION_LABELS = ("org.opencontainers.image.version", "org.label-schema.version")
+
+    def remote_version(self, spec: str) -> str:
+        """取远端镜像 config 中的版本标签（org.opencontainers.image.version 等）。
+
+        流程：GET manifest → config.digest → GET config blob → Labels。
+        blob 常见 307 重定向到 CDN（Docker Hub）：手动跟随且不带 Authorization
+        （预签名地址带 Authorization 反而会被拒）。失败一律返回空串。
+        """
+        registry, repo, tag = parse_image_spec(spec)
+        insecure = _is_insecure(registry)
+        base = self._base_url(registry, insecure)
+        client = self._client()
+        headers = {"Accept": MANIFEST_ACCEPT}
+        url = f"{base}/v2/{repo}/manifests/{tag}"
+        resp = client.get(url, headers=headers)
+        if resp.status_code in (401, 403):
+            auth_header = resp.headers.get("www-authenticate", "")
+            if "Bearer" in auth_header:
+                headers["Authorization"] = f"Bearer {self._bearer_token(client, auth_header, repo, insecure)}"
+            resp = client.get(url, headers=headers)
+        if resp.status_code != 200:
+            return ""
+        try:
+            cfg_digest = ((resp.json() or {}).get("config") or {}).get("digest") or ""
+            if not cfg_digest:
+                return ""  # schemaVersion 1 或异常 manifest：无 config
+            blob_url = f"{base}/v2/{repo}/blobs/{cfg_digest}"
+            bresp = client.get(blob_url, headers=headers)
+            if bresp.status_code in (301, 302, 303, 307, 308):
+                loc = bresp.headers.get("location", "")
+                if loc:
+                    bresp = client.get(loc)  # CDN 预签名地址：不带认证头
+            if bresp.status_code != 200:
+                return ""
+            labels = ((bresp.json() or {}).get("config") or {}).get("Labels") or {}
+            for key in self._VERSION_LABELS:
+                v = labels.get(key)
+                if v:
+                    return str(v)[:64]
+        except Exception:
+            return ""
+        return ""
+
     # ---------- 协议层 ----------
 
     def _base_url(self, registry: str, insecure: bool) -> str:

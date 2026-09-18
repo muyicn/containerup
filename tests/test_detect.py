@@ -59,6 +59,31 @@ class TestFirstScanBaseline:
 
 
 class TestDetectAndNotify:
+    def test_version_labels_recorded(self, seeded_client, monkeypatch):
+        """版本号：本地从镜像 OCI 标签取；远端从 registry 取（仅远端摘要变化时拉取一次）。"""
+        monkeypatch.setattr(detect, "make_registry_client", lambda: REGISTRY)
+        seeded_client.seed_container(
+            "ver-app", "verimg:1.0",
+            labels={"com.docker.compose.project": "vproj",
+                    "org.opencontainers.image.version": "1.0.0"},
+        )
+        REGISTRY.specs["verimg:1.0"] = {"digest": _fake_digest("verimg:1.0"), "tags": ["1.0"]}
+        scan(seeded_client)
+        row = db.query_one("SELECT * FROM containers WHERE name='ver-app'")
+        assert row["local_version"] == "1.0.0"
+        # 远端发布新版（带版本号）
+        REGISTRY.specs["verimg:1.0"]["digest"] = "sha256:" + "7" * 64
+        REGISTRY.specs["verimg:1.0"]["version"] = "1.1.0"
+        scan(seeded_client)
+        row = db.query_one("SELECT * FROM containers WHERE name='ver-app'")
+        assert row["update_available"] == 1
+        assert row["remote_version"] == "1.1.0"
+        # 同更新重复扫描：复用缓存版本号，不再重复标记
+        scan(seeded_client)
+        row = db.query_one("SELECT * FROM containers WHERE name='ver-app'")
+        assert row["remote_version"] == "1.1.0"
+        assert row["update_available"] == 1
+
     def test_update_alert_once_and_dedup(self, seeded_client, monkeypatch):
         """摘要变化 → update 通知一次；重复扫描同摘要不再通知（防抖）。"""
         monkeypatch.setattr(detect, "make_registry_client", lambda: REGISTRY)

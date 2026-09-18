@@ -100,19 +100,19 @@ def registry_digest(spec: str) -> str:
     return out.strip()
 
 
-def push_app(tag: str, mark: str, bad: bool = False) -> None:
+def push_app(tag: str, mark: str, bad: bool = False, version: str = "0.0.0") -> None:
     df = "e2e/Dockerfile.app-bad" if bad else "e2e/Dockerfile.app"
-    sh_ok(f"docker build -q -t {REG}/e2e-app:{tag} --build-arg MARK={mark} -f {df} e2e/")
+    sh_ok(f"docker build -q -t {REG}/e2e-app:{tag} --build-arg MARK={mark} --build-arg VERSION={version} -f {df} e2e/")
     sh_ok(f"docker push -q {REG}/e2e-app:{tag}")
 
 
-def push_db(tag: str, mark: str) -> None:
-    sh_ok(f"docker build -q -t {REG}/e2e-db:{tag} --build-arg MARK={mark} -f e2e/Dockerfile.db e2e/")
+def push_db(tag: str, mark: str, version: str = "0.0.0") -> None:
+    sh_ok(f"docker build -q -t {REG}/e2e-db:{tag} --build-arg MARK={mark} --build-arg VERSION={version} -f e2e/Dockerfile.db e2e/")
     sh_ok(f"docker push -q {REG}/e2e-db:{tag}")
 
 
-def push_watch(tag: str, mark: str) -> None:
-    sh_ok(f"docker build -q -t {REG}/e2e-watch:{tag} --build-arg MARK={mark} -f e2e/Dockerfile.db e2e/")
+def push_watch(tag: str, mark: str, version: str = "0.0.0") -> None:
+    sh_ok(f"docker build -q -t {REG}/e2e-watch:{tag} --build-arg MARK={mark} --build-arg VERSION={version} -f e2e/Dockerfile.db e2e/")
     sh_ok(f"docker push -q {REG}/e2e-watch:{tag}")
 
 
@@ -199,10 +199,13 @@ def main() -> int:
     check("E4 首巡不告警（events=0）", first.get("events") == 0, str(first))
 
     # ---------- E5 digest-only 更新发现 ----------
-    push_app("v1", "second-release")
+    push_app("v1", "second-release", version="1.1.0")
     time.sleep(1)
     api.scan()
-    check("E5 上游摘要变化 → 更新标记", api.get_container("e2e-web").get("update_available") == 1)
+    w5 = api.get_container("e2e-web")
+    check("E5 上游摘要变化 → 更新标记", w5.get("update_available") == 1)
+    check("E5 远端版本号已记录", w5.get("remote_version") == "1.1.0",
+          f"local_ver={w5.get('local_version')} remote_ver={w5.get('remote_version')}")
 
     # ---------- E6 compose 聚合通知 ----------
     push_db("v1", "second-release")
@@ -223,10 +226,14 @@ def main() -> int:
     check("E7 新容器运行中", dinspect("e2e-web").get("State", {}).get("Running") is True)
     st, v = c.req("GET", "/api/containers/e2e-web/versions")
     check("E7 版本台账记录", st == 200 and len(v.get("versions", [])) >= 2, str(v)[:200])
+    api.scan()  # 更新后重扫：本地版本号应刷新为新镜像版本
+    w7 = api.get_container("e2e-web")
+    check("E7 更新后本地版本号刷新", w7.get("local_version") == "1.1.0" and w7.get("update_available") == 0,
+          f"local_ver={w7.get('local_version')} avail={w7.get('update_available')}")
 
     # ---------- E8 健康门控失败 → 自动回滚 ----------
     api.settings({"health_wait_sec": "30"})
-    push_app("v1", "bad-release", bad=True)
+    push_app("v1", "bad-release", bad=True, version="1.2.0")
     time.sleep(1)
     api.scan()
     check("E8 坏版本被发现", api.get_container("e2e-web").get("update_available") == 1)

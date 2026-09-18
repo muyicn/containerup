@@ -57,6 +57,10 @@ class StaticRegistrySource:
         _, _, tag = parse_image_spec(spec)
         return RegistryResult(digest=digest, newer_tags=newer_version_tags(tag, tags))
 
+    def remote_version(self, spec: str) -> str:
+        """Mock：specs 可带 version 字段（无则空串）。"""
+        return str((self.specs.get(spec) or {}).get("version") or "")
+
     def close(self) -> None:  # 与 RegistryClient 接口对齐（demo 无资源需释放）
         pass
 
@@ -91,20 +95,24 @@ def _sync_containers(docker_client: Any) -> dict[str, dict[str, Any]]:
         # 更新对比口径：manifest 摘要（pull 时记录的 RepoDigests），与 registry 检测同口径；
         # 本地构建/导入镜像无 RepoDigests → 置空（首巡仅建基线，不做 digest 对比）
         repo_digest = c.get("repo_digest") or ""
+        # 镜像版本号（构建时写入的 OCI 标签，随容器 Labels 透出）
+        image_version = c.get("image_version") or ""
         with db.tx() as conn:
             conn.execute(
                 """
                 INSERT INTO containers(name, image_spec, compose_id, service, mode,
-                    check_enabled, update_enabled, protected, local_digest)
-                VALUES(?,?,?,?,?,1,0,?,?)
+                    check_enabled, update_enabled, protected, local_digest, local_version)
+                VALUES(?,?,?,?,?,1,0,?,?,?)
                 ON CONFLICT(name) DO UPDATE SET
                     image_spec=excluded.image_spec,
                     compose_id=excluded.compose_id,
                     service=excluded.service,
                     protected=excluded.protected,
-                    local_digest=excluded.local_digest
+                    local_digest=excluded.local_digest,
+                    local_version=excluded.local_version
                 """,
-                (name, image_spec, compose_id, service, "auto", protected, repo_digest or None),
+                (name, image_spec, compose_id, service, "auto", protected,
+                 repo_digest or None, image_version or None),
             )
     # 已消失的容器：清 update_available（继承上游 v1.41 修复语义）
     rows = db.query("SELECT name FROM containers")
@@ -136,6 +144,7 @@ def _check_target(
     mode = detect_mode(tag, mode_override)
     events: list[dict[str, Any]] = []
     new_digest: Optional[str] = None
+    remote_version: str = ""
     # 首巡判定：从未成功记录过远端摘要 → 本次为基线巡检（不告警）
     first_seen = not row.get("remote_digest")
 
@@ -144,6 +153,18 @@ def _check_target(
     # 容器运行镜像落后于上游 —— 与飞牛/Docker UI 的直觉语义一致（曾因首巡基线吞掉落后状态）
     if local_digest and result.digest and result.digest != local_digest:
         new_digest = result.digest
+        # 版本号（展示用）：仅远端摘要变化时拉取一次（同更新重复扫描复用缓存）
+        if row.get("remote_digest") != result.digest:
+            fetcher = getattr(client, "remote_version", None)
+            if callable(fetcher):
+                try:
+                    remote_version = fetcher(image_spec)
+                except Exception:
+                    remote_version = ""
+            else:
+                remote_version = ""
+        else:
+            remote_version = row.get("remote_version") or ""
         events.append(
             {
                 "type": "update",
@@ -181,12 +202,12 @@ def _check_target(
     changed_now = db.now_iso()
     with db.tx() as conn:
         if new_digest:
-            # 检测到更新：记远端摘要、标记可更新；local_digest 保持容器实际值（_sync_containers 已写入）
+            # 检测到更新：记远端摘要与版本号、标记可更新；local_digest 保持容器实际值（_sync_containers 已写入）
             conn.execute(
-                "UPDATE containers SET remote_digest=?, update_available=1, local_image=0, "
+                "UPDATE containers SET remote_digest=?, remote_version=?, update_available=1, local_image=0, "
                 "remote_changed_at=COALESCE(remote_changed_at,?), last_checked_at=?, newer_tags=? "
                 "WHERE name=?",
-                (result.digest, changed_now, changed_now, db.jdump(merged_seen), target),
+                (result.digest, remote_version, changed_now, changed_now, db.jdump(merged_seen), target),
             )
         elif first_seen:
             # 首巡未检测到更新（local == remote 或 local 为空）：
@@ -211,12 +232,12 @@ def _check_target(
 
             record_version(target, result.digest, image_spec, "baseline")
         else:
-            # 非首巡且无新摘要：容器与远端一致 → 清除更新标记；刷新远端摘要供下次 304 优化
+            # 非首巡且无新摘要：容器与远端一致 → 清除更新标记与远端版本；刷新远端摘要供下次 304 优化
             up_to_date = bool(local_digest and result.digest and local_digest == result.digest)
             sets = "last_checked_at=?, newer_tags=?, remote_digest=?, local_image=0"
             params: list = [changed_now, db.jdump(merged_seen), result.digest]
             if up_to_date:
-                sets += ", update_available=0"
+                sets += ", update_available=0, remote_version=''"
             params.append(target)
             conn.execute(f"UPDATE containers SET {sets} WHERE name=?", params)
     return {"events": events, "new_digest": new_digest, "newer_tags": merged_seen}

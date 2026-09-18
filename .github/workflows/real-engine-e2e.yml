@@ -32,10 +32,10 @@ jobs:
             curl -fsS http://127.0.0.1:5000/v2/ >/dev/null 2>&1 && break
             sleep 1
           done
-          docker build -q -t 127.0.0.1:5000/e2e-app:v1   --build-arg MARK=seed1 -f e2e/Dockerfile.app e2e/
-          docker build -q -t 127.0.0.1:5000/e2e-app:pin  --build-arg MARK=seed1 -f e2e/Dockerfile.app e2e/
-          docker build -q -t 127.0.0.1:5000/e2e-app:1.0.0 --build-arg MARK=seed1 -f e2e/Dockerfile.app e2e/
-          docker build -q -t 127.0.0.1:5000/e2e-db:v1    --build-arg MARK=seed1 -f e2e/Dockerfile.db e2e/
+          docker build -q -t 127.0.0.1:5000/e2e-app:v1   --build-arg MARK=seed1 --build-arg VERSION=1.0.0 -f e2e/Dockerfile.app e2e/
+          docker build -q -t 127.0.0.1:5000/e2e-app:pin  --build-arg MARK=seed1 --build-arg VERSION=1.0.0 -f e2e/Dockerfile.app e2e/
+          docker build -q -t 127.0.0.1:5000/e2e-app:1.0.0 --build-arg MARK=seed1 --build-arg VERSION=1.0.0 -f e2e/Dockerfile.app e2e/
+          docker build -q -t 127.0.0.1:5000/e2e-db:v1    --build-arg MARK=seed1 --build-arg VERSION=1.0.0 -f e2e/Dockerfile.db e2e/
           docker push -q 127.0.0.1:5000/e2e-app:v1
           docker push -q 127.0.0.1:5000/e2e-app:pin
           docker push -q 127.0.0.1:5000/e2e-app:1.0.0

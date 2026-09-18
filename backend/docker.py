@@ -25,6 +25,17 @@ class DockerError(RuntimeError):
 # 平台托管标记：容器显式打上 dev.containerup.managed=false 时，扫描跳过该容器
 MANAGED_LABEL = "dev.containerup.managed"
 
+# 镜像版本标签（OCI 标准 + label-schema 约定，构建时写入，运行时随容器 Labels 透出）
+_VERSION_LABELS = ("org.opencontainers.image.version", "org.label-schema.version")
+
+
+def _label_version(labels: Optional[dict[str, str]]) -> str:
+    for k in _VERSION_LABELS:
+        v = (labels or {}).get(k)
+        if v:
+            return str(v)[:64]
+    return ""
+
 
 def _fake_digest(spec: str) -> str:
     """Mock 摘要：对引用做稳定哈希（模拟 sha256 digest）。"""
@@ -89,6 +100,8 @@ class LocalDockerClient:
             # manifest 摘要（pull 时记录）：与 registry 检测同口径，用于更新对比；
             # image_id 是 config digest，仅用于回退定向重建，两者不可混用
             "repo_digest": repo_digests[0].split("@")[-1] if repo_digests else "",
+            # 镜像构建时写入的版本号（容器 Labels 已包含镜像标签，零额外开销）
+            "image_version": _label_version(labels),
             "running": state.get("Running", False),
             "health": health if health != "none" else "none",
             "labels": labels,
@@ -201,6 +214,7 @@ class MockDockerClient:
             "image": image,
             "image_id": _fake_digest(image),
             "repo_digest": _fake_digest(image),
+            "image_version": _label_version(labels),
             "running": running,
             "health": health,
             "labels": dict(labels or {}),
@@ -270,6 +284,7 @@ class MockDockerClient:
             "image": image,
             "image_id": image_id or self.pull(image),
             "repo_digest": image_id or self.pull(image),
+            "image_version": _label_version(labels),
             "running": False,
             "health": "none",
             "labels": dict(labels or {}),
