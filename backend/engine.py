@@ -464,7 +464,15 @@ class UpdateEngine:
                     self.docker.start(name)
                     if not self._wait_healthy(name):
                         # 降级重建后不健康 → 回滚旧镜像（完整配置）
-                        self._recreate_full(name, old, image_id=(old.get("image_id") or "") or None, start=True)
+                        old_digest = (old.get("repo_digest") or "") or ""
+                        old_image_id = None
+                        if old_digest:
+                            try:
+                                old_image_id = self.docker.resolve_image_ref(old.get("image") or "", old_digest)
+                            except DockerError:
+                                old_image_id = None
+                        old_image_id = old_image_id or (old.get("image_id") or "") or None
+                        self._recreate_full(name, old, image_id=old_image_id, start=True)
                         if not self._wait_healthy(name):
                             res.result = "failed"
                             res.errors.append("unhealthy after rollback")
@@ -495,7 +503,15 @@ class UpdateEngine:
             res.errors.append("healthcheck failed after update")
             db.log_event("warn", f"更新后健康检查未通过 {name}，准备自动回滚")
             try:
-                self._recreate_full(name, old, image_id=(old.get("image_id") or "") or None,
+                old_digest = (old.get("repo_digest") or "") or ""
+                old_image_id = None
+                if old_digest:
+                    try:
+                        old_image_id = self.docker.resolve_image_ref(old.get("image") or "", old_digest)
+                    except DockerError:
+                        old_image_id = None
+                old_image_id = old_image_id or (old.get("image_id") or "") or None
+                self._recreate_full(name, old, image_id=old_image_id,
                                     start=was_running)
                 if not self._wait_healthy(name):
                     res.result = "failed"
@@ -545,41 +561,80 @@ class UpdateEngine:
             db.log_event("err", f"恢复容器 {name} 失败：{e}")
 
     def _wait_healthy(self, name: str) -> bool:
-        if self.health_wait_sec <= 0:
-            # 无健康检查等待：直接查一次。真实引擎上，镜像内嵌 HEALTHCHECK 的新容器
-            # 短暂处于 starting——需要短暂宽限窗口等出 healthy/unhealthy，避免误判回滚
-            try:
-                h = self.docker.inspect(name).get("health")
-            except DockerError:
-                return False
-            if h in ("healthy", "none"):
-                return True
-            if h == "starting":
-                deadline = time.time() + 10
-                while time.time() < deadline:
-                    time.sleep(0.5)
-                    try:
-                        h = self.docker.inspect(name).get("health")
-                    except DockerError:
+        """容器健康门控检查：
+        1. 进程存活检查：容器停止/崩溃（running=False）立即判定不健康，触发回滚；
+        2. 无健康检查定义（health in ('none', '')）：
+           - 若配置了健康等待秒数（health_wait_sec > 0），轮询等待该窗口确保服务未闪退崩溃；
+           - 若未配置（health_wait_sec <= 0），进程存活即判定通过；
+        3. 有健康检查定义（Docker HEALTHCHECK）：
+           - 处于 starting 状态：属于 Docker 镜像初始化与 start-period 阶段（常见 20~60 秒，
+             如 daidai-panel、各类 Web 框架、数据库容器）。持续轮询等待转为 healthy 或 unhealthy；
+             起始宽限窗口为 max(self.health_wait_sec, 60) 秒（Mock 测试下为 1 秒）；
+           - 状态转为 healthy：立即返回 True（提前结束等待，无需硬等满宽限期）；
+           - 状态转为 unhealthy：立即返回 False，触发回滚；
+           - 若宽限窗口结束仍处于 starting，但容器主进程持续存活运行正常（running=True）：
+             放行更新（避免对慢启动/长预热容器产生误判回滚），记录审计日志。
+        """
+        try:
+            c = self.docker.inspect(name)
+        except DockerError:
+            return False
+
+        if not c.get("running"):
+            return False
+
+        h = c.get("health")
+        if h == "unhealthy":
+            return False
+        if h == "healthy":
+            return True
+
+        if h in ("none", ""):
+            if self.health_wait_sec <= 0:
+                return bool(c.get("running"))
+            deadline = time.time() + self.health_wait_sec
+            while time.time() < deadline:
+                time.sleep(0.2)
+                try:
+                    c = self.docker.inspect(name)
+                    if not c.get("running"):
                         return False
-                    if h in ("healthy", "none"):
-                        return True
-                    if h == "unhealthy":
-                        return False
-            return h == "healthy"
-        deadline = time.time() + self.health_wait_sec
+                except DockerError:
+                    return False
+            return True
+
+        # starting 状态轮询
+        is_mock = hasattr(self.docker, "_containers")
+        default_grace = 1 if is_mock else 60
+        poll_interval = 0.05 if is_mock else 1.0
+        wait_window = max(self.health_wait_sec, default_grace)
+
+        deadline = time.time() + wait_window
         while time.time() < deadline:
+            time.sleep(poll_interval)
             try:
                 c = self.docker.inspect(name)
-                if c.get("health") == "unhealthy":
-                    return False
-                if c.get("health") == "healthy":
-                    return True
             except DockerError:
                 return False
-            time.sleep(0.2)
+
+            if not c.get("running"):
+                return False
+
+            h = c.get("health")
+            if h == "healthy":
+                return True
+            if h == "unhealthy":
+                return False
+            if h in ("none", ""):
+                return True
+
+        # 超时宽限：若仍为 starting 但主进程平稳存活，视为正常启动放行，避免误杀回滚
         try:
-            return self.docker.inspect(name).get("health") in ("healthy", "none")
+            c = self.docker.inspect(name)
+            if c.get("running") and c.get("health") == "starting":
+                db.log_event("info", f"容器 {name} 仍在启动中（starting 超过 {wait_window}s 宽限期），主进程存活，放行更新")
+                return True
+            return bool(c.get("running") and c.get("health") in ("healthy", "none"))
         except DockerError:
             return False
 

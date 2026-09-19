@@ -59,6 +59,24 @@ class TestRunArgsFromConfig:
         assert "--ip" not in s
         assert "--network-alias" not in s
 
+    def test_mounts_volume_and_destination_mapping(self):
+        mounts = [
+            {"Type": "volume", "Name": "my_named_vol", "Destination": "/app/data", "RW": True},
+            {"Type": "bind", "Source": "/var/log/app", "Destination": "/app/log", "RW": False},
+        ]
+        args = run_args_from_config(_cfg(mounts=mounts))
+        s = " ".join(args)
+        assert "-v my_named_vol:/app/data" in s
+        assert "-v /var/log/app:/app/log:ro" in s
+
+    def test_network_alias_filters_short_container_id(self):
+        aliases = ["daidai-panel", "a1b2c3d4e5f6", "custom-alias"]
+        args = run_args_from_config(_cfg(network_mode="my-net", network_aliases=aliases))
+        s = " ".join(args)
+        assert "--network-alias daidai-panel" in s
+        assert "--network-alias custom-alias" in s
+        assert "--network-alias a1b2c3d4e5f6" not in s
+
     def test_empty_config(self):
         assert run_args_from_config({}, None) == []
 
@@ -228,3 +246,58 @@ class TestUpdateVersionRefresh:
         assert row["update_available"] == 0
         # 旧版本镜像已清理（best-effort rmi）
         assert any(e.startswith("rmi:") for e in client.event_log)
+
+
+class TestHealthGatingStarting:
+    """验证健康门控对 starting 状态的处理（修复 daidai-panel 等容器因 start-period 误判回滚）"""
+
+    def test_starting_transitions_to_healthy(self):
+        client = MockDockerClient()
+        client.seed_container("app1", "test:latest", health="starting")
+        engine = UpdateEngine(client, health_wait_sec=0)
+
+        # 模拟在轮询检查时状态转为 healthy
+        orig_inspect = client.inspect
+        calls = [0]
+
+        def dynamic_inspect(name):
+            res = orig_inspect(name)
+            calls[0] += 1
+            if calls[0] >= 2:
+                res["health"] = "healthy"
+            return res
+
+        client.inspect = dynamic_inspect
+        assert engine._wait_healthy("app1") is True
+
+    def test_starting_transitions_to_unhealthy(self):
+        client = MockDockerClient()
+        client.seed_container("app2", "test:latest", health="starting")
+        engine = UpdateEngine(client, health_wait_sec=0)
+
+        orig_inspect = client.inspect
+        calls = [0]
+
+        def dynamic_inspect(name):
+            res = orig_inspect(name)
+            calls[0] += 1
+            if calls[0] >= 2:
+                res["health"] = "unhealthy"
+            return res
+
+        client.inspect = dynamic_inspect
+        assert engine._wait_healthy("app2") is False
+
+    def test_starting_container_crashed_returns_false(self):
+        client = MockDockerClient()
+        client.seed_container("app3", "test:latest", health="starting", running=False)
+        engine = UpdateEngine(client, health_wait_sec=0)
+        assert engine._wait_healthy("app3") is False
+
+    def test_starting_persists_past_grace_period_running_alive_passes(self):
+        client = MockDockerClient()
+        client.seed_container("app4", "test:latest", health="starting", running=True)
+        # Mock 下 wait_window 默认 1 秒，等待超时后因进程正常存活予以放行
+        engine = UpdateEngine(client, health_wait_sec=0)
+        assert engine._wait_healthy("app4") is True
+

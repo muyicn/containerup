@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
     scheduler.stop()
 
 
-app = FastAPI(title="容器守望者", version="1.1.2", lifespan=lifespan)
+app = FastAPI(title="容器守望者", version="1.1.3", lifespan=lifespan)
 
 
 # ---------- 认证依赖 ----------

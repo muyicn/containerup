@@ -93,8 +93,11 @@ def run_args_from_config(config: dict[str, Any], labels: Optional[dict] = None) 
         args += ["-v", b]
     # Mounts 新式（具名卷/bind；匿名卷由镜像 VOLUME 指令自动带出，不重复声明）
     for m in config.get("mounts") or []:
-        src = m.get("Source") or m.get("Name") or ""
-        tgt = m.get("Target") or ""
+        if m.get("Type") == "volume" and m.get("Name"):
+            src = m.get("Name")
+        else:
+            src = m.get("Source") or m.get("Name") or ""
+        tgt = m.get("Destination") or m.get("Target") or ""
         if not src or not tgt or tgt in {b.split(":")[1] for b in (config.get("binds") or []) if ":" in b}:
             continue
         spec_v = f"{src}:{tgt}"
@@ -107,6 +110,8 @@ def run_args_from_config(config: dict[str, Any], labels: Optional[dict] = None) 
     # network-alias 与 --ip 仅在自定义网络下受支持（bridge/default/host/none 传递会导致 Docker 报错）
     if nm and nm not in ("bridge", "default", "host", "none") and not nm.startswith("container:"):
         for a in config.get("network_aliases") or []:
+            if len(str(a)) in (12, 64) and all(ch in "0123456789abcdefABCDEF" for ch in str(a)):
+                continue
             args += ["--network-alias", str(a)]
         ip4 = str(config.get("ipam_v4") or "")
         if ip4:
@@ -230,6 +235,10 @@ class LocalDockerClient:
         net = data.get("NetworkSettings") or {}
         networks = net.get("Networks") or {}
         nm = host.get("NetworkMode") or ""
+        if (not nm or nm in ("default", "bridge")) and len(networks) == 1:
+            candidate_net = next(iter(networks.keys()))
+            if candidate_net not in ("bridge", "default", "host", "none"):
+                nm = candidate_net
         # 与 NetworkMode 匹配的 endpoint（静态 IP/别名）；缺省取唯一网络
         ep = networks.get(nm) or (next(iter(networks.values())) if len(networks) == 1 else None) or {}
         return {
@@ -251,7 +260,7 @@ class LocalDockerClient:
                 "restart": (host.get("RestartPolicy") or {}).get("Name", "no"),
                 # ---- 完整运行时配置（重建保真：端口/挂载/网络等不再丢失）----
                 "binds": host.get("Binds") or [],
-                "mounts": host.get("Mounts") or [],
+                "mounts": data.get("Mounts") or host.get("Mounts") or [],
                 "network_mode": nm or "bridge",
                 "network_aliases": (ep.get("Aliases") or []) if isinstance(ep, dict) else [],
                 "ipam_v4": ((ep.get("IPAMConfig") or {}).get("IPv4Address") or "") if isinstance(ep, dict) else "",
@@ -435,7 +444,7 @@ class LocalDockerClient:
         # image_id：定向用指定镜像 ID 重建（回退场景；本地 dangling 镜像仍存在时有效）
         # 重建保真：run_args_from_config 完整映射端口/挂载/网络/安全等运行时配置
         ref = image_id or image
-        cmd = ["run", "-d", "--name", name, *run_args_from_config(config or {}, labels), ref, *(config.get("cmd") or [])]
+        cmd = ["create", "--name", name, *run_args_from_config(config or {}, labels), ref, *(config.get("cmd") or [])]
         self._run(*cmd)
         return self.inspect(name)
 
