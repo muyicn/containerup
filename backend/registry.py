@@ -178,6 +178,8 @@ def parse_image_spec(spec: str) -> tuple[str, str, str]:
     spec = spec.strip()
     if not spec:
         raise ValueError("empty image spec")
+    if spec.startswith("sha256:"):
+        raise ValueError(f"raw image ID hash is not a repository spec: {spec}")
     # 排除 @digest 引用（不支持按摘要更新）
     if "@" in spec:
         raise ValueError("digest refs are not supported for check")

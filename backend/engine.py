@@ -263,15 +263,22 @@ class UpdateEngine:
         pull_errors: dict[str, str] = {}
         for name in plan.to_update:
             old = snapshot.get(name)
-            if not old or not old.get("image"):
+            if not old:
                 continue
-            img = old["image"]
+            canonical_img = self._resolve_canonical_image(name, old)
+            if not canonical_img or canonical_img.startswith("sha256:"):
+                pull_failed.add(name)
+                err_msg = f"无法解析有效镜像仓库规范名（当前为 {canonical_img or '空'}）"
+                pull_errors[name] = err_msg
+                db.log_event("err", f"拉取镜像失败 {name}：{err_msg}，容器未停止，保持现状")
+                continue
+            old["image"] = canonical_img
             try:
-                self.docker.pull(img)
+                self.docker.pull(canonical_img)
             except Exception as e:
                 pull_failed.add(name)
                 pull_errors[name] = str(e)
-                db.log_event("err", f"拉取镜像失败 {name}：{img}（{e}），容器未停止，保持现状")
+                db.log_event("err", f"拉取镜像失败 {name}：{canonical_img}（{e}），容器未停止，保持现状")
 
         # 真正需要停止并更新的容器（排除 pull 失败的）
         valid_to_update = plan.to_update - pull_failed
@@ -331,6 +338,26 @@ class UpdateEngine:
             results.append(res)
         return results
 
+    def _resolve_canonical_image(self, name: str, old: Optional[dict[str, Any]]) -> str:
+        """解析容器拉取与重建使用的规范镜像名（repo:tag）。
+
+        防止裸 sha256 镜像 ID / digest 引用渗透进 docker pull 或 recreate 流程。
+        若容器退化为 sha256:... 或带 @digest，优先从持久标签或数据库台账恢复规范名。
+        """
+        img = ((old or {}).get("image") or "").strip()
+        if not img or img.startswith("sha256:") or "@" in img:
+            lbl_img = ((old or {}).get("labels") or {}).get("dev.containerup.canonical_image") or ""
+            if lbl_img and not lbl_img.startswith("sha256:") and "@" not in lbl_img:
+                return lbl_img.strip()
+            row = db.query_one("SELECT image_spec FROM containers WHERE name=?", (name,))
+            if row and row.get("image_spec"):
+                db_spec = row["image_spec"].strip()
+                if db_spec and not db_spec.startswith("sha256:") and "@" not in db_spec:
+                    return db_spec
+        if "@" in img:
+            img = img.split("@")[0].strip()
+        return img
+
     def _deps_of(self, name: str, snapshot: dict[str, dict[str, Any]]) -> set[str]:
         deps = get_dependencies(snapshot.get(name, {}))
         cid = get_compose_id(snapshot.get(name, {}))
@@ -351,6 +378,9 @@ class UpdateEngine:
         if not old:
             res.errors.append("snapshot missing")
             return res
+        canonical_img = self._resolve_canonical_image(name, old)
+        if canonical_img and not canonical_img.startswith("sha256:"):
+            old["image"] = canonical_img
         old_image = old["image"]
         old_labels = _keep_container_labels(old.get("labels"))
         old_config = dict(old.get("config") or {})
@@ -399,9 +429,9 @@ class UpdateEngine:
         #      按 tag 重建等于没回退 —— 必须用 tag@digest 精确锁定旧版本）----
         old_digest = (old.get("repo_digest") or "") or ""
         old_image_id = None
-        if old_digest:
+        if old_digest and canonical_img and not canonical_img.startswith("sha256:"):
             try:
-                old_image_id = self.docker.resolve_image_ref(old_image, old_digest)
+                old_image_id = self.docker.resolve_image_ref(canonical_img, old_digest)
             except DockerError:
                 old_image_id = None
         old_image_id = old_image_id or (old.get("image_id") or "") or None
@@ -429,8 +459,9 @@ class UpdateEngine:
         if self.docker.exists(name):
             self.docker.stop(name)
             self.docker.remove(name)
+        canonical_img = self._resolve_canonical_image(name, old) or old.get("image") or ""
         self.docker.create(
-            name, old.get("image") or "", dict(old.get("config") or {}),
+            name, canonical_img, dict(old.get("config") or {}),
             labels=_keep_container_labels(old.get("labels")), image_id=image_id,
         )
         if start:
@@ -458,7 +489,8 @@ class UpdateEngine:
                 if self.docker.exists(name):
                     self.docker.stop(name)
                     self.docker.remove(name)
-                self.docker.create(name, old.get("image") or "", dict(old.get("config") or {}),
+                canonical_img = self._resolve_canonical_image(name, old) or old.get("image") or ""
+                self.docker.create(name, canonical_img, dict(old.get("config") or {}),
                                    labels=_keep_container_labels(old.get("labels")))
                 if was_running:
                     self.docker.start(name)
@@ -466,9 +498,9 @@ class UpdateEngine:
                         # 降级重建后不健康 → 回滚旧镜像（完整配置）
                         old_digest = (old.get("repo_digest") or "") or ""
                         old_image_id = None
-                        if old_digest:
+                        if old_digest and canonical_img and not canonical_img.startswith("sha256:"):
                             try:
-                                old_image_id = self.docker.resolve_image_ref(old.get("image") or "", old_digest)
+                                old_image_id = self.docker.resolve_image_ref(canonical_img, old_digest)
                             except DockerError:
                                 old_image_id = None
                         old_image_id = old_image_id or (old.get("image_id") or "") or None
@@ -503,11 +535,12 @@ class UpdateEngine:
             res.errors.append("healthcheck failed after update")
             db.log_event("warn", f"更新后健康检查未通过 {name}，准备自动回滚")
             try:
+                canonical_img = self._resolve_canonical_image(name, old) or old.get("image") or ""
                 old_digest = (old.get("repo_digest") or "") or ""
                 old_image_id = None
-                if old_digest:
+                if old_digest and canonical_img and not canonical_img.startswith("sha256:"):
                     try:
-                        old_image_id = self.docker.resolve_image_ref(old.get("image") or "", old_digest)
+                        old_image_id = self.docker.resolve_image_ref(canonical_img, old_digest)
                     except DockerError:
                         old_image_id = None
                 old_image_id = old_image_id or (old.get("image_id") or "") or None
@@ -548,9 +581,10 @@ class UpdateEngine:
                     self.docker.start(name)
                     db.log_event("info", f"已重新启动容器 {name}（恢复运行原版本）")
             else:
+                canonical_img = self._resolve_canonical_image(name, old) or old.get("image") or ""
                 old_image_id = (old.get("image_id") or "") or None
                 self.docker.create(
-                    name, old["image"], dict(old.get("config") or {}),
+                    name, canonical_img, dict(old.get("config") or {}),
                     labels=_keep_container_labels(old.get("labels")),
                     image_id=old_image_id,
                 )

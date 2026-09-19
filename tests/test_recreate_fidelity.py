@@ -4,11 +4,13 @@
 - compose 更新路径：compose_up 重建（配置保留）+ 失败自动回滚
 - run_update 成功后版本号对齐 remote_version（修"更新后仍显示旧版本号"）
 """
+import pytest
+
 from backend import db
-from backend.docker import MockDockerClient, compose_spec, run_args_from_config
+from backend.docker import MockDockerClient, compose_spec, run_args_from_config, DockerError, _fake_digest
 from backend.detect import StaticRegistrySource, scan
-from backend.docker import _fake_digest
-from backend.engine import UpdateEngine
+from backend.engine import UpdateEngine, UpdatePlan
+from backend.registry import parse_image_spec
 
 
 def _cfg(**over):
@@ -300,4 +302,84 @@ class TestHealthGatingStarting:
         # Mock 下 wait_window 默认 1 秒，等待超时后因进程正常存活予以放行
         engine = UpdateEngine(client, health_wait_sec=0)
         assert engine._wait_healthy("app4") is True
+
+
+class TestRawSha256ImageProtection:
+    """验证裸 sha256 镜像引用的防御与回退机制（修复 Task #4 pull sha256:... 失败问题）"""
+
+    def test_parse_image_spec_rejects_bare_sha256(self):
+        with pytest.raises(ValueError, match="raw image ID hash"):
+            parse_image_spec("sha256:94289294d9531cb93961f51dbb38991b9f858d93913dd79f9f07efd395f515d6")
+
+    def test_docker_pull_rejects_bare_sha256(self):
+        client = MockDockerClient()
+        with pytest.raises(DockerError, match="cannot pull bare image ID"):
+            client.pull("sha256:94289294d9531cb93961f51dbb38991b9f858d93913dd79f9f07efd395f515d6")
+
+    def test_inspect_recovers_canonical_image_from_label(self):
+        client = MockDockerClient()
+        labels = {"dev.containerup.canonical_image": "linzixuanzz/daidai-panel:latest"}
+        client.seed_container("panel1", "sha256:94289294d9531cb93961f51dbb38991b9f858d93913dd79f9f07efd395f515d6", labels=labels)
+        info = client.inspect("panel1")
+        assert info["image"] == "linzixuanzz/daidai-panel:latest"
+
+    def test_inspect_recovers_canonical_image_from_db(self):
+        client = MockDockerClient()
+        db.init_db()
+        with db.tx() as conn:
+            conn.execute(
+                "INSERT INTO containers(name, image_spec, check_enabled, update_enabled) VALUES(?,?,1,1) "
+                "ON CONFLICT(name) DO UPDATE SET image_spec=excluded.image_spec",
+                ("panel2", "linzixuanzz/daidai-panel:latest"),
+            )
+        client.seed_container("panel2", "sha256:94289294d9531cb93961f51dbb38991b9f858d93913dd79f9f07efd395f515d6")
+        info = client.inspect("panel2")
+        assert info["image"] == "linzixuanzz/daidai-panel:latest"
+
+    def test_engine_updates_container_with_bare_sha256_snapshot(self):
+        """核心复现与验证：若容器先前因回滚或退化为裸 sha256 镜像，引擎拉取新版本并成功更新，不再报 pull sha256 错误"""
+        client = MockDockerClient()
+        db.init_db()
+        with db.tx() as conn:
+            conn.execute(
+                "INSERT INTO containers(name, image_spec, check_enabled, update_enabled) VALUES(?,?,1,1) "
+                "ON CONFLICT(name) DO UPDATE SET image_spec=excluded.image_spec",
+                ("daidai-panel", "linzixuanzz/daidai-panel:latest"),
+            )
+        # 容器内当前的 image 是裸 sha256（即用户遇到的 Task #4 现场）
+        client.seed_container("daidai-panel", "sha256:94289294d9531cb93961f51dbb38991b9f858d93913dd79f9f07efd395f515d6")
+        client.set_digest("linzixuanzz/daidai-panel:latest", "sha256:newdigest111111111111111111111111111111111111111111111111111111111111")
+
+        engine = UpdateEngine(client, health_wait_sec=0)
+        plan = UpdatePlan(to_update={"daidai-panel"}, affected=set(), order=["daidai-panel"])
+        results = engine.execute(plan)
+
+        assert len(results) == 1
+        assert results[0].result == "updated"
+        # 验证 pull 记录中拉取的是规范镜像 linzixuanzz/daidai-panel:latest，而非 sha256:...
+        assert any(e == "pull:linzixuanzz/daidai-panel:latest" for e in client.event_log)
+        assert not any(e.startswith("pull:sha256:") for e in client.event_log)
+        # 容器重建后恢复规范镜像名
+        assert client.inspect("daidai-panel")["image"] == "linzixuanzz/daidai-panel:latest"
+
+    def test_rollback_preserves_canonical_image(self):
+        client = MockDockerClient()
+        db.init_db()
+        with db.tx() as conn:
+            conn.execute(
+                "INSERT INTO containers(name, image_spec, check_enabled, update_enabled) VALUES(?,?,1,1) "
+                "ON CONFLICT(name) DO UPDATE SET image_spec=excluded.image_spec",
+                ("app-rollback", "myrepo/app:latest"),
+            )
+        client.seed_container("app-rollback", "myrepo/app:latest")
+        client.mark_unhealthy_once("app-rollback")
+
+        engine = UpdateEngine(client, health_wait_sec=0)
+        plan = UpdatePlan(to_update={"app-rollback"}, affected=set(), order=["app-rollback"])
+        results = engine.execute(plan)
+
+        assert len(results) == 1
+        assert results[0].result == "rolled_back"
+        # 回滚后 inspect 仍能解析出规范镜像名，不会永久退化为裸 sha256
+        assert client.inspect("app-rollback")["image"] == "myrepo/app:latest"
 

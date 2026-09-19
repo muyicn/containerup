@@ -222,14 +222,56 @@ class LocalDockerClient:
         image_spec = (data.get("Config") or {}).get("Image", "")
         full_image_id = data.get("Image") or ""
         image_id = full_image_id[:71] or _fake_digest(image_spec)
-        # RepoDigests 是镜像属性（不在容器 inspect 里），需额外查 image inspect
+        # RepoDigests 与 RepoTags 需从 image inspect 查询
         repo_digests: list[str] = []
+        repo_tags: list[str] = []
         if full_image_id:
             try:
                 img_raw = self._run("image", "inspect", full_image_id, "--format", "{{json .RepoDigests}}")
                 repo_digests = json.loads(img_raw) if img_raw.strip() else []
             except DockerError:
                 pass
+            try:
+                tags_raw = self._run("image", "inspect", full_image_id, "--format", "{{json .RepoTags}}")
+                repo_tags = json.loads(tags_raw) if tags_raw.strip() else []
+            except DockerError:
+                pass
+
+        clean_name = (data.get("Name") or "").lstrip("/")
+        # 规整 image_spec：若容器 Config.Image 为裸 sha256 镜像 ID 或空，必须解析回真实 repo:tag
+        if not image_spec or image_spec.startswith("sha256:") or "@" in image_spec:
+            # 1. 优先从容器持久标签获取规范镜像名
+            lbl_spec = labels.get("dev.containerup.canonical_image") or ""
+            if lbl_spec and not lbl_spec.startswith("sha256:") and "@" not in lbl_spec:
+                image_spec = lbl_spec
+            # 2. 尝试从本地镜像有效的 RepoTags 恢复
+            if not image_spec or image_spec.startswith("sha256:") or "@" in image_spec:
+                for t in repo_tags:
+                    if t and t != "<none>:<none>" and not t.startswith("sha256:") and "@" not in t:
+                        image_spec = t
+                        break
+            # 3. 尝试从数据库 containers 台账获取记录的原 image_spec
+            if not image_spec or image_spec.startswith("sha256:") or "@" in image_spec:
+                try:
+                    from backend import db
+                    row = db.query_one("SELECT image_spec FROM containers WHERE name=?", (clean_name,))
+                    if row and row.get("image_spec"):
+                        candidate = row["image_spec"].strip()
+                        if candidate and not candidate.startswith("sha256:") and "@" not in candidate:
+                            image_spec = candidate
+                except Exception:
+                    pass
+            # 4. 兜底从 RepoDigests 提取仓库名（例如 linzixuanzz/daidai-panel@sha256:...）
+            if (not image_spec or image_spec.startswith("sha256:") or "@" in image_spec) and repo_digests:
+                for rd in repo_digests:
+                    if "@" in rd:
+                        r = rd.split("@")[0].strip()
+                        if r and not r.startswith("sha256:"):
+                            image_spec = f"{r}:latest"
+                            break
+            # 5. 若仍带 @sha256: 则剥除摘要保留 repo:tag
+            if "@" in image_spec:
+                image_spec = image_spec.split("@")[0].strip()
         host = data.get("HostConfig") or {}
         cfgc = data.get("Config") or {}
         net = data.get("NetworkSettings") or {}
@@ -305,6 +347,8 @@ class LocalDockerClient:
         self._run("rm", "-f", name)
 
     def pull(self, spec: str) -> str:
+        if not spec or spec.startswith("sha256:"):
+            raise DockerError(f"invalid image pull target '{spec}': cannot pull bare image ID hash without repository name")
         self._run("pull", spec)
         raw = self._run("inspect", f"{spec}@json") if False else ""
         # 取 pull 后镜像 digest
@@ -323,6 +367,8 @@ class LocalDockerClient:
         （容器镜像引用仍显示 latest 而非镜像 ID，符合 compose/用户直觉）。
         本地缺失该 digest 时按 digest 重新拉取（镜像被清理后的现实恢复路径）。
         """
+        if not repo_spec or repo_spec.startswith("sha256:"):
+            return digest
         try:
             registry, repo, tag = parse_image_spec(repo_spec)
         except ValueError:
@@ -444,7 +490,10 @@ class LocalDockerClient:
         # image_id：定向用指定镜像 ID 重建（回退场景；本地 dangling 镜像仍存在时有效）
         # 重建保真：run_args_from_config 完整映射端口/挂载/网络/安全等运行时配置
         ref = image_id or image
-        cmd = ["create", "--name", name, *run_args_from_config(config or {}, labels), ref, *(config.get("cmd") or [])]
+        lbls = dict(labels or {})
+        if image and not image.startswith("sha256:") and "@" not in image:
+            lbls["dev.containerup.canonical_image"] = image
+        cmd = ["create", "--name", name, *run_args_from_config(config or {}, lbls), ref, *(config.get("cmd") or [])]
         self._run(*cmd)
         return self.inspect(name)
 
@@ -516,7 +565,23 @@ class MockDockerClient:
     def inspect(self, name: str) -> dict[str, Any]:
         if name not in self._containers:
             raise DockerError(f"no such container: {name}")
-        return dict(self._containers[name])
+        res = dict(self._containers[name])
+        img = res.get("image") or ""
+        if not img or img.startswith("sha256:") or "@" in img:
+            lbl_spec = (res.get("labels") or {}).get("dev.containerup.canonical_image") or ""
+            if lbl_spec and not lbl_spec.startswith("sha256:") and "@" not in lbl_spec:
+                res["image"] = lbl_spec
+            else:
+                try:
+                    from backend import db
+                    row = db.query_one("SELECT image_spec FROM containers WHERE name=?", (name,))
+                    if row and row.get("image_spec"):
+                        db_spec = row["image_spec"].strip()
+                        if db_spec and not db_spec.startswith("sha256:") and "@" not in db_spec:
+                            res["image"] = db_spec
+                except Exception:
+                    pass
+        return res
 
     def exists(self, name: str) -> bool:
         return name in self._containers
@@ -545,6 +610,8 @@ class MockDockerClient:
         self.event_log.append(f"remove:{name}")
 
     def pull(self, spec: str) -> str:
+        if not spec or spec.startswith("sha256:"):
+            raise DockerError(f"invalid image pull target '{spec}': cannot pull bare image ID hash without repository name")
         self.event_log.append(f"pull:{spec}")
         if spec in self._digest_map:
             return self._digest_map[spec]
@@ -552,6 +619,8 @@ class MockDockerClient:
 
     def resolve_image_ref(self, repo_spec: str, digest: str) -> str:
         """Mock 无 config/manifest digest 之分，返回 tag@digest 引用形态。"""
+        if not repo_spec or repo_spec.startswith("sha256:"):
+            return digest
         try:
             _, repo, tag = parse_image_spec(repo_spec)
         except ValueError:
@@ -575,18 +644,22 @@ class MockDockerClient:
         image_id: Optional[str] = None,
     ) -> dict[str, Any]:
         self._rebuild_count[name] = self._rebuild_count.get(name, 0) + 1
+        lbls = dict(labels or {})
+        if image and not image.startswith("sha256:") and "@" not in image:
+            lbls["dev.containerup.canonical_image"] = image
         self._containers[name] = {
             "name": name,
             "image": image,
             "image_id": image_id or self.pull(image),
             "repo_digest": image_id or self.pull(image),
-            "image_version": _label_version(labels),
+            "image_version": _label_version(lbls),
             "running": False,
             "health": "none",
-            "labels": dict(labels or {}),
+            "labels": lbls,
             "config": dict(config),
         }
         self.event_log.append(f"create:{name}")
+        return dict(self._containers[name])
         return dict(self._containers[name])
 
     def compose_up(self, spec: dict[str, Any]) -> str:

@@ -99,6 +99,8 @@ def _sync_containers(docker_client: Any) -> dict[str, dict[str, Any]]:
             prev = db.query_one("SELECT image_spec FROM containers WHERE name=?", (name,))
             if prev and prev["image_spec"] and not prev["image_spec"].startswith("sha256:"):
                 image_spec = prev["image_spec"]
+            elif "@" in image_spec:
+                image_spec = image_spec.split("@")[0]
         # 更新对比口径：manifest 摘要（pull 时记录的 RepoDigests），与 registry 检测同口径；
         # 本地构建/导入镜像无 RepoDigests → 置空（首巡仅建基线，不做 digest 对比）
         repo_digest = c.get("repo_digest") or ""
