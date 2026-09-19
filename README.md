@@ -9,57 +9,131 @@ AIGC:
   ReservedCode2: '904af496-9fc2-4e26-96e2-cd60fa8b697a'
 ---
 
-# 容器守望者
+# 容器守望者 (ContainerUp)
 
-一体化 Docker 容器更新守望平台：融合 [Tugtainer](https://github.com/Quenary/tugtainer)（自动更新执行引擎）与 [Vigil](https://github.com/jingyuan9527/vigil)（双模式检测与两级通知）的设计语义，全新实现。
+<p align="center">
+  <strong>现代化轻量级 Docker 容器更新、检测、通知与安全回滚守望平台</strong><br>
+  专为 NAS（群晖 Synology DSM、极空间、威联通 QNAP、飞牛 fnOS）及 Homelab 极客环境深度优化设计。
+</p>
 
-> 本仓库为 M1-Lite 落地版本（对应《容器守望者产品需求方案》P0 范围 + Compose 专题 partial 策略）。
+<p align="center">
+  <img src="https://img.shields.io/badge/Docker-learycn%2Fcontainerup-blue?logo=docker" alt="Docker Image" />
+  <img src="https://img.shields.io/badge/Version-v1.1.5-emerald" alt="Version" />
+  <img src="https://img.shields.io/badge/Tests-131%20passed-brightgreen" alt="Tests" />
+  <img src="https://img.shields.io/badge/License-MIT-slate" alt="License" />
+</p>
 
-## 功能（已实现并验证）
+---
 
-- **双模式检测引擎**：Digest-Only（浮动 tag 追摘要）/ Pin-Watch（版本 tag 追新版本号 tag），首巡基线不告警，Registry 原生 API（HEAD manifest / If-None-Match 304 / Bearer token 流 / insecure registry）
-- **两级通知**：update（有新版本，强提醒）/ new-tag（可选更新，弱提醒），防抖 + 目标达成自动已读 + 已读裁剪
-- **项目聚合通知**：同 compose 项目同批次发现聚合为一条，两级分开聚合互不吞没
-- **Compose 更新引擎（PRD 5.2 partial 策略）**：label 反推项目（无需 compose 文件）、依赖拓扑排序（先停依赖方、先起被依赖方）、受影响容器停止后重启重连、失败传播（上游失败下游跳过且保持运行）、**健康门控失败自动回滚（旧镜像 ID 定向重建）**
-- **手动版本回退**：版本台账记录每个容器运行过的镜像（基线/更新/回退），卡片菜单打开版本列表弹窗，任选历史版本回退（默认选中上一版）；回退后**自动关闭该容器的自动更新开关**，由用户决定何时恢复（重新打开「自动」或手动更新）
-- **后台自动调度**：设置页配置检测间隔（秒级热生效，无需重启），到点自动扫描 → 候选就绪即自动执行更新（发布延迟/合并窗口/freeze/ignored 全部生效），任务完成自动通知（trigger=auto）；与手动操作互斥
-- **通知渠道**：Webhook（JSON）/ 钉钉 / 飞书 / 企业微信（markdown），单渠道连通性测试
-- **认证安全**：bcrypt + JWT httpOnly Cookie（SameSite=Lax）、登录限流（5 次失败锁 15 分钟）、首次部署引导初始化
-- **卡片式响应式 Web UI**：Bento 指标卡（点击即筛选）、容器卡片流、状态徽章、暗色模式、移动端底部导航
-- **远端镜像监控（哨兵模式）**：无需本机运行/装 Docker，直接盯住任意 registry 引用；上游摘要变化 → update 通知，pin-watch 新版本 tag → new-tag 通知（首检基线不告警、同摘要/同 tag 去重）；页面展示生效模式、上游状态（基线一致/上游已更新）、可用新版本列表、最近检查时间
-- **演示模式**：无 Docker 环境也能完整体验（内置 compose 三容器场景 + 模拟发布 + 模拟失败回滚剧本）
+## 📖 平台简介
 
-## 快速开始
+**ContainerUp（容器守望者）** 融合了自动更新执行引擎与双模式版本检测机制。不同于传统的 Watchtower 等简单粗暴的更新工具，ContainerUp 聚焦于**高保真配置重建**、**拓扑依赖感知**、**智能健康门控**与**秒级自动/手动回滚**，保证您在家用 NAS 或私有服务器上的关键容器永远稳定可用。
 
-```bash
-# 演示模式（推荐首次体验，内置 admin/admin123）
-# Windows PowerShell
-$env:VT_DEMO_MODE='1'; python run.py
-# Linux/macOS
-VT_DEMO_MODE=1 python run.py
-# 浏览器打开 http://127.0.0.1:9412
+---
 
-# 正常模式（自动探测 Docker CLI；无引擎时自动降级 Mock 并在界面标注）
-python run.py
-```
+## 🌟 核心功能特性清单
 
-首次部署：浏览器打开后按引导设置管理员密码（或 `VT_DEMO_ADMIN_PASSWORD` 预置）。
+### 1. 🚀 智能更新引擎 (Update Engine)
+- **Compose 项目拓扑感知**：自动读取容器 Compose 元数据与 `depends_on` 依赖关系，按依赖树精准确定重建顺序（先停依赖者，先起被依赖者）。
+- **群晖 DSM 与 NAS 降级高保真重建**：
+  - 针对群晖 Container Manager 屏蔽 compose 物理文件路径的场景，自动降级为全量运行时配置反解；
+  - 完整继承端口映射（PortBindings）、卷与路径挂载（Binds/Mounts）、网络模式与网络别名（network_aliases）、静态 IP（IPAMConfig）、环境变量（Env）、重启策略（RestartPolicy）、额外 Hosts（ExtraHosts）及非镜像自定义标签。
+- **预拉取校验与多级镜像名自愈 (Canonical Resolution)**：
+  - 严格防御裸 `sha256:` 镜像哈希拉取，自动从持久化标签、宿主机 RepoTags、本地版本台账中反解标准 `repo:tag` 镜像引用，杜绝 `pull access denied for sha256` 异常。
+- **停机状态保护 (Stop Preservation)**：
+  - 处于关停（Stopped/Exited）状态的容器更新后依然保持关停，绝不会擅自开机唤醒，充分尊重用户意志。
+- **全局并发互斥锁**：
+  - 自动调度与手动触发互斥运行，忙时自动让行，避免任务积压与冲突。
 
-## Docker 部署
+### 2. 🛡️ 健康门控与秒级自动回滚 (Healthcheck & Rollback)
+- **智能健康门控**：
+  - 容器更新启动后自动监测健康状态；
+  - 针对大型服务提供 `starting` 启动宽限期，避免慢启动容器被误判为失败。
+- **零宕机风险自动回滚**：
+  - 更新后容器若崩溃、非零退出或健康检测失败，更新引擎自动拉起旧版镜像进行定向回滚重建，确保业务零中断。
+- **历史版本台账与任意版本回退**：
+  - 数据库自动沉淀历史运行镜像摘要与语义化版本号；
+  - 提供直观的可视化弹窗，随时自由选择回退到任意历史版本；
+  - 回退成功后**自动关闭自动更新开关**，防止被后续自动巡检无脑覆盖。
 
-镜像已发布至 Docker Hub：[learycn/containerup](https://hub.docker.com/r/learycn/containerup)，由 GitHub Actions 自动构建推送：推送 `main` → 重建 `latest`；推送 `v*` 版本 tag（如 `v1.1.5`）→ 生成 `1.1.5` / `1.1` / `latest` 三个镜像标签。
+### 3. 🔍 原生双模式镜像检测 (Detection Engine)
+- **Auto / Digest-Only 模式**：
+  - 追踪浮动 tag（如 `latest`）的 Manifest Digest 变化，上游构建发布新镜像即刻感知。
+- **Pin-Watch 模式**：
+  - 针对固定版本号 tag（如 `v1.2.0`、`1.25-alpine`），仅在仓库发布同系列更高 semver tag 时进行弱提醒，**坚决不越级跨版本自动更新**，保障大版本升级的绝对安全。
+- **首巡基线防骚扰 (Baseline)**：
+  - 首次扫描仅建立基线快照，不产生误报告警。
+- **语义化真实版本号反解**：
+  - 镜像即使使用 `latest` 标签，也能结合 OCI Labels 或远端 Tags 映射反解出形如 `v0.7.21` 的真实版本号。
+- **远端镜像哨兵 (Remote Watches)**：
+  - 无需在本地部署或运行容器，直接添加任意远端镜像引用即可实时跟踪更新动态。
+
+### 4. 📢 两级通知中心与项目级聚合 (Notification Center)
+- **强弱两级通知分流**：
+  - `update` 强提醒：针对当前运行镜像摘要变化，提示立即更新；
+  - `new-tag` 弱提醒：针对 Pin-Watch 发现的上游更高版本，提示可选升级。
+- **Compose 项目级聚合通知**：
+  - 同一 Compose 堆栈内多个容器同时有更新时，自动合并为一条项目卡片通知，告别通知轰炸。
+- **智能防抖与目标达成自动已读**：
+  - 相同摘要与 Tag 重复扫描不重发；容器成功更新到最新版本后，相关未读通知自动沉底标记为已读。
+- **多渠道即时推送**：
+  - 原生支持 **企业微信 (WeCom)**、**钉钉 (DingTalk)**、**飞书 (Feishu)**、通用 **Webhook (JSON)**，支持一键发送测试消息验证连通性。
+
+### 5. 🎛️ 容器生命周期与完全隔离管理 (Isolation & Lifecycle)
+- **完全绝缘隔离 (`managed=false`)**：
+  - 容器添加标签 `dev.containerup.managed=false`，ContainerUp 扫描阶段完全忽略，不入库、不展示、不打扰。
+- **受保护模式 (`protected=true`)**：
+  - 容器添加标签 `dev.quenary.tugtainer.protected=true` 或在面板中开启，仅通知检测结果，严禁任何自动或手动更新操作。
+- **界面一键忽略与移除记录**：
+  - 支持将容器一键移入“已忽略”列表；
+  - 针对宿主机上已物理删除的容器，巡检时**自动清除幽灵记录**，同时提供卡片菜单 **「移除监控记录」** 供随时手动下线。
+
+### 6. ⏱️ 后台自动调度器 (Scheduler)
+- **配置秒级热生效**：
+  - 在前端设置页调整自动扫描周期（秒），无需重启容器，后台调度线程实时热加载。
+- **发布延迟与合并等待窗口**：
+  - `delay_update_sec`：支持为新发布的镜像设置冷静观察期，规避上游翻车；
+  - `merge_wait_sec`：支持 Compose 组内合并等待窗口，消除组内镜像构建时间差。
+
+### 7. 💻 现代化响应式 Web 控制台
+- **Bento 风格仪表盘**：指标卡片直观汇总“监控总数”、“已是最新”、“有更新可用”、“已忽略”，点击即完成联动筛选。
+- **灵活卡片流**：直观展示容器运行 tag、真实解析版本、最新版本、更新差异、生效策略及更新日志。
+- **明暗主题无缝切换**：全套深色/浅色模式适配，移动端专属抽屉与底部导航，随时随地手机查阅与操作。
+
+### 8. 🔒 企业级安全与演示沙盒
+- **安全认证**：bcrypt 强密码哈希存储、基于 HttpOnly Cookie 的 JWT 认证、防暴力破解保护（连续 5 次失败自动封禁 15 分钟）。
+- **演示模式 (Demo Mode)**：内置内存虚拟 Docker 引擎与多容器拓扑场景，无需真实 Docker 环境即可完整体验检测、更新、模拟故障与回滚全流程。
+
+---
+
+## 🏷️ 容器控制标签指南 (Labels)
+
+在 `docker-compose.yml` 或 `docker run --label` 中配置以下标签，即可精准控制 ContainerUp 的托管行为：
+
+| 标签 (Label) | 可选值 | 说明 |
+| :--- | :--- | :--- |
+| `dev.containerup.managed` | `false` | **完全绝缘**：ContainerUp 彻底忽略该容器，不入库、不检测、不更新。 |
+| `dev.quenary.tugtainer.protected` | `true` | **受保护容器**：仅检测并发送更新通知，更新引擎硬编码拒绝执行任何更新。 |
+| `dev.quenary.tugtainer.depends_on` | `容器名` | 自定义跨容器依赖顺序（支持逗号分隔多个容器）。 |
+| `dev.containerup.canonical_image` | `repo:tag` | 手动显式指定规范镜像引用（通常系统会自动自愈识别，无需手动配置）。 |
+
+---
+
+## 🐳 部署与运行
+
+### 方式 A：Docker CLI 单命令运行（推荐）
 
 ```bash
 docker run -d \
   --name containerup \
   -p 9412:9412 \
-  -v vigiltainer-data:/data \
+  -v containerup-data:/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --restart unless-stopped \
   learycn/containerup:latest
 ```
 
-或使用 docker compose：
+### 方式 B：Docker Compose 部署
 
 ```yaml
 services:
@@ -70,94 +144,50 @@ services:
     ports:
       - "9412:9412"
     volumes:
-      - vigiltainer-data:/data
+      - containerup-data:/data
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
 volumes:
-  vigiltainer-data:
+  containerup-data:
 ```
 
-> `pull_policy: always` 防止 `latest` 被本地旧缓存卡住（Docker 不会自动重拉已存在的 `docker compose up`）；旧版部署请先 `docker compose pull && docker compose up -d`。
+> 💡 **提示**：
+> 1. 初次启动后在浏览器中访问 `http://<NAS的IP>:9412`，按引导设置管理员密码即可开始使用。
+> 2. 数据与密钥均持久化于 `/data` 卷中，更新 ContainerUp 镜像不会丢失任何配置与历史记录。
 
-- 镜像内置 Docker CLI（官方静态客户端）；运行时挂载 `/var/run/docker.sock` 后平台直接管理宿主机引擎，访问 `/api/public/health` 看到 `"docker_impl":"local"` 即接入成功（CI 已在真实引擎上冒烟验证该路径）；未挂载 sock 时自动降级为无引擎模式并在界面标注
-- 数据库与 JWT 密钥均持久化于 `/data` 卷，升级镜像不丢配置；容器内置 HEALTHCHECK（探测 `/api/public/health`）
-- 演示模式：追加环境变量 `VT_DEMO_MODE=1`（即使挂载了 sock 也优先走内存剧本，适合无侵入体验）
-- 安全提示：`docker.sock` 等同宿主机 Docker 的 root 级权限，请仅将服务暴露给可信网络
+---
 
-## 自动更新什么时候执行？
+## ⚙️ 环境变量说明
 
-四种触发路径（对应 PRD 5.3）：
+| 环境变量 | 默认值 | 作用说明 |
+| :--- | :--- | :--- |
+| `VT_PORT` | `9412` | Web 界面与 API 监听端口 |
+| `VT_DB_PATH` | `/data/vigiltainer.db` | SQLite 数据库文件路径 |
+| `VT_JWT_SECRET` | 随机生成 | JWT 签名密钥（首次运行自动生成并保存在数据目录） |
+| `VT_DEMO_MODE` | `false` | 是否开启无侵入演示沙箱模式（`true`/`false`） |
+| `VT_SCAN_INTERVAL_SEC` | `0` | 后台自动检测巡检间隔（秒，可在设置页随时热修改，`0` 为仅手动） |
+| `VT_DELAY_UPDATE_SEC` | `0` | 全局发布延迟（秒，新镜像发布后需等待冷静期才触发更新） |
+| `VT_MERGE_WAIT_SEC` | `0` | Compose 项目合并等待窗口（秒） |
+| `VT_REGISTRY_MIRROR` | 空 | Docker Registry 加速代理镜像源地址 |
+| `VT_INSECURE_REGISTRIES`| 空 | 允许以 HTTP 协议访问的自建私有 Registry 白名单（逗号分隔） |
 
-1. **周期自动**（后台调度器）：设置页「自动检测间隔」> 0 时，激活/改配置后**立即执行一轮**，随后每 N 秒一轮：扫描 → 发现更新 → 候选就绪（通过发布延迟/合并窗口、未 freeze/ignored）→ 自动执行更新 → 任务通知（trigger=auto）。配置改动秒级热生效；`0 = 仅手动`（默认）。
-2. **手动全量**：仪表盘「更新全部可用」→ 跳过延迟/合并窗口（用户明确意志），仍按拓扑序执行。
-3. **手动单容器**：容器卡片「更新」按钮。
-4. **手动扫描**：仅检测+通知，不执行更新。
+---
 
-保护语义（所有路径共用）：自动更新**永不更换版本号 tag**（大版本升级必须人工）；protected 标签容器永不参与；全局互斥保证同一时刻仅一个更新任务（忙时立即让行不排队）。
+## 🧪 自动化测试与工程质量
 
-## 验证与复现
+ContainerUp 拥有严密的自动化测试工程体系，覆盖全链路核心逻辑：
 
 ```bash
-# 单元 + 集成测试（88 项：检测分流/拓扑计划/回滚/版本回退/防抖/聚合/限流/API 全链路/调度器热生效/watch 哨兵通知）
-python -m pytest tests/ -q
-
-# L0 端到端验证（真实 uvicorn HTTP + 真实 socket 驱动 21 项断言）
-python verify_e2e.py
+# 运行完整测试套件（131 项单元测试与集成测试全量通过）
+pytest -v
 ```
 
-## 环境变量
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `VT_PORT` | `9412` | 服务端口 |
-| `VT_DB_PATH` | 项目目录 `vigiltainer.db` | SQLite 数据库 |
-| `VT_JWT_SECRET`（支持 `_FILE`） | 自动生成持久化 | JWT 签名密钥 |
-| `VT_DEMO_MODE` | `false` | 演示模式（内存 Mock + 种子场景） |
-| `VT_LOGIN_MAX_FAILS` / `VT_LOGIN_LOCK_SEC` | `5` / `900` | 登录限流 |
-| `VT_DELAY_UPDATE_SEC` | `0` | 全局发布延迟（新镜像观察期） |
-| `VT_SCAN_INTERVAL_SEC` | `0` | 自动检测间隔基线（设置页可覆盖，热生效；0=仅手动） |
-| `VT_MERGE_WAIT_SEC` | `0` | 项目合并等待窗口（消除组内异步更新中间态） |
-| `VT_REGISTRY_MIRROR` | 空 | 注册表镜像主机 |
-| `VT_INSECURE_REGISTRIES` | 空 | http registry 白名单（逗号分隔） |
-
-## 目录结构
-
-```
-containerup/
-├── backend/
-│   ├── config.py      # 配置（env/_FILE secrets）
-│   ├── db.py          # SQLite（WAL + 线程锁）
-│   ├── registry.py    # 检测引擎：双模式 + Registry 协议栈
-│   ├── docker.py      # DockerClient 抽象：Local(CLI) / Mock(内存)
-│   ├── engine.py      # 更新引擎：compose 组 + 拓扑 + 回滚状态机 + 版本台账/手动回退
-│   ├── detect.py      # 扫描编排：采集→检测→防抖→聚合→自动已读
-│   ├── scheduler.py   # 后台调度器：周期扫描→自动更新（热生效/互斥/状态上报）
-│   ├── notify.py      # 通知中心：两级通知 + 渠道投递
-│   ├── auth.py        # bcrypt + JWT + 登录限流
-│   └── app.py         # FastAPI 全量 REST API
-├── frontend/          # Vue 3 + Vite + Tailwind CSS（现代组件化前端）
-│   ├── src/components/  # StatCard / ContainerCard / AppNav(移动抽屉) / LogPanel(底部折叠日志) / Toast / Modal / Icon
-│   ├── src/views/       # Dashboard / Containers / Notifications / Watches / Settings(含修改密码)
-│   └── dist/            # 构建产物（后端直接托管）
-├── tests/             # pytest 测试套件（88 项）
-├── verify_e2e.py      # L0 端到端验证脚本（21 项断言）
-└── run.py             # 启动入口
-```
-
-### 前端开发
-
-```bash
-cd frontend
-npm install        # 首次
-npm run dev        # 开发（Vite 热更新，/api 代理到 9412）
-npm run build      # 构建产物到 frontend/dist（后端自动托管）
-```
-
-## 已知限制（诚实披露）
-
-1. **真实引擎验证范围有限**：CI 已在真实 Docker 引擎上完成 Local 引擎接入冒烟（sock 挂载 + CLI 探测 + 容器列表可见，`docker_impl=local`）；但**更新/重建/回滚等写操作未经真实引擎回归**（开发与 CI 均未执行真实更新），容器重建命令为简化参数集（env/cmd/restart/labels），复杂容器（挂载、网络别名、自定义端口映射）重建保真度有限，真实联调时需补齐 inspect→create 的全量配置映射——首次在真实环境部署时请先用非关键容器试点。
-2. M1-Lite 未含：多主机 Agent、Hooks、健康监控独立任务、prune、OIDC、Apprise 扩展渠道（见 PRD M2 范围）。
-3. 演示模式的 registry 状态为内存静态源，服务重启后回到初始摘要（持久化仅 DB 侧）；生产模式无此问题。
-
-> AI生成
+测试矩阵涵盖：
+- Registry 协议栈认证与 Bearer Token 交互
+- 裸 sha256 镜像 ID 拦截与多层级规范恢复自愈
+- 容器运行时配置高保真重建（端口/卷/网络/别名/环境变量）
+- Compose 拓扑排序、上游故障传播与降级保护
+- 慢启动宽限期与健康检测失败秒级回滚机制
+- 幽灵容器自动同步清除与监控记录维护
+- 通知两级分流、项目聚合与目标达成自动已读
