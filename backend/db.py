@@ -159,8 +159,8 @@ def init_db() -> None:
         if "version" not in version_cols:
             _CONN.execute("ALTER TABLE container_versions ADD COLUMN version TEXT")
             _CONN.commit()
-        # 默认策略项初始化：自动更新联动与默认开启自动更新（开箱即用）
-        for k, v in (("auto_update_after_scan", "1"), ("default_update_enabled", "1")):
+        # 默认策略项初始化：扫描联动自动更新（默认开启），新容器默认策略（默认0由用户按需开启）
+        for k, v in (("auto_update_after_scan", "1"), ("default_update_enabled", "0")):
             _CONN.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (k, v))
         _CONN.commit()
 

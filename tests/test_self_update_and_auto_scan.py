@@ -50,24 +50,42 @@ def test_is_self_container_identification():
 
 
 def test_detect_sync_defaults_and_self_protection():
-    """测试容器纳管同步：普通容器默认开自动更新，自身容器默认关闭自动并受保护。"""
+    """测试容器纳管同步：默认模式与自定义策略，自身容器始终默认关闭自动并受保护。"""
     docker = MockDockerClient()
     docker.seed_container("redis", "redis:alpine")
     docker.seed_container("containerup", "learycn/containerup:latest")
 
+    # 1. 默认设置 default_update_enabled = 0
+    db.setting_set("default_update_enabled", "0")
     detect._sync_containers(docker)
 
     row_redis = db.query_one("SELECT * FROM containers WHERE name='redis'")
     assert row_redis is not None
     assert row_redis["is_self"] == 0
     assert row_redis["protected"] == 0
-    assert row_redis["update_enabled"] == 1  # 默认开箱即用自动更新
+    assert row_redis["update_enabled"] == 0
 
     row_self = db.query_one("SELECT * FROM containers WHERE name='containerup'")
     assert row_self is not None
     assert row_self["is_self"] == 1
     assert row_self["protected"] == 1  # 自身受保护
     assert row_self["update_enabled"] == 0  # 默认关闭自动更新，杜绝意外自杀
+
+    # 2. 开启 default_update_enabled = 1 时，新容器自动开启，但自身容器依然坚决关闭自动
+    docker.seed_container("nginx", "nginx:alpine")
+    docker.seed_container("vigiltainer", "vigiltainer:latest")
+    db.setting_set("default_update_enabled", "1")
+    detect._sync_containers(docker)
+
+    row_nginx = db.query_one("SELECT * FROM containers WHERE name='nginx'")
+    assert row_nginx is not None
+    assert row_nginx["update_enabled"] == 1
+
+    row_vt = db.query_one("SELECT * FROM containers WHERE name='vigiltainer'")
+    assert row_vt is not None
+    assert row_vt["is_self"] == 1
+    assert row_vt["update_enabled"] == 0  # 自身容器即使开启了全局默认更新也强制为 0
+
 
 
 def test_engine_plan_self_protection_in_auto_and_batch():
@@ -78,10 +96,10 @@ def test_engine_plan_self_protection_in_auto_and_batch():
 
     detect._sync_containers(docker)
 
-    # 标记两容器均有可用更新
+    # 标记两容器均有可用更新并开启自动更新
     with db.tx() as conn:
-        conn.execute("UPDATE containers SET update_available=1 WHERE name='app1'")
-        conn.execute("UPDATE containers SET update_available=1 WHERE name='containerup'")
+        conn.execute("UPDATE containers SET update_available=1, update_enabled=1 WHERE name='app1'")
+        conn.execute("UPDATE containers SET update_available=1, update_enabled=1 WHERE name='containerup'")
 
     # 1. 自动模式（candidates is None）：自身容器被 self-protected 排除
     plan_auto = engine._build_plan(docker, manual=False, names=None)
@@ -124,7 +142,9 @@ def test_api_scan_auto_update_linkage(client):
     docker.seed_container("web", "mock/web:1.0")
     detect._sync_containers(docker)
 
-    # 确保设置 auto_update_after_scan 为 1
+    # 容器开启自动更新且设置 auto_update_after_scan 为 1
+    with db.tx() as conn:
+        conn.execute("UPDATE containers SET update_enabled=1 WHERE name='web'")
     db.setting_set("auto_update_after_scan", "1")
 
     # 模拟 registry 有新镜像
