@@ -332,15 +332,16 @@ class LocalDockerClient:
                         break
             except DockerError:
                 pass
+            tag_suffix = f":{tag}" if tag else ""
             if not have:
                 try:
-                    pull_ref = f"{repo}@{digest}" if registry in {"registry-1.docker.io", "docker.io"} \
-                        else f"{registry}/{repo}@{digest}"
+                    pull_ref = f"{repo}{tag_suffix}@{digest}" if registry in {"registry-1.docker.io", "docker.io"} \
+                        else f"{registry}/{repo}{tag_suffix}@{digest}"
                     self._run("pull", pull_ref)
                 except DockerError:
                     pass  # 预拉失败不阻断：docker run 时会再拉
             prefix = "" if registry in {"registry-1.docker.io", "docker.io"} else f"{registry}/"
-            return f"{prefix}{repo}@{digest}"
+            return f"{prefix}{repo}{tag_suffix}@{digest}"
         # 兼容兑底：无 repo/tag 信息时退回完整 Image ID
         try:
             raw = self._run("images", "--digests", "--format", "{{json .}}")
@@ -546,7 +547,8 @@ class MockDockerClient:
             _, repo, tag = parse_image_spec(repo_spec)
         except ValueError:
             repo, tag = "", ""
-        return f"{repo}@{digest}" if repo else digest
+        tag_suffix = f":{tag}" if tag else ""
+        return f"{repo}{tag_suffix}@{digest}" if repo else digest
 
     def remove_image(self, image_spec: str, digest: str, image_id: Optional[str] = None) -> bool:
         """Mock：记录清理动作。"""
