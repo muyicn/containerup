@@ -104,11 +104,13 @@ def run_args_from_config(config: dict[str, Any], labels: Optional[dict] = None) 
     nm = str(config.get("network_mode") or "")
     if nm and nm not in ("bridge", "default"):
         args += ["--network", nm]
-    for a in config.get("network_aliases") or []:
-        args += ["--network-alias", str(a)]
-    ip4 = str(config.get("ipam_v4") or "")
-    if ip4 and nm and not nm.startswith("container:"):
-        args += ["--ip", ip4]
+    # network-alias 与 --ip 仅在自定义网络下受支持（bridge/default/host/none 传递会导致 Docker 报错）
+    if nm and nm not in ("bridge", "default", "host", "none") and not nm.startswith("container:"):
+        for a in config.get("network_aliases") or []:
+            args += ["--network-alias", str(a)]
+        ip4 = str(config.get("ipam_v4") or "")
+        if ip4:
+            args += ["--ip", ip4]
     for h in config.get("extra_hosts") or []:
         args += ["--add-host", str(h)]
     for d in config.get("dns") or []:
@@ -175,12 +177,16 @@ class LocalDockerClient:
         cmd = [CONFIG.DOCKER_BIN, *args]
         try:
             out = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8"
+                cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace"
             )
         except FileNotFoundError as e:
             raise DockerError(f"docker binary not found: {CONFIG.DOCKER_BIN}") from e
+        except subprocess.TimeoutExpired as e:
+            raise DockerError(f"docker {' '.join(args)} 超时（超过 {timeout} 秒）") from e
+        except Exception as e:
+            raise DockerError(f"docker {' '.join(args)} 执行异常: {e}") from e
         if out.returncode != 0:
-            raise DockerError(f"docker {' '.join(args)} failed: {out.stderr.strip()}")
+            raise DockerError(f"docker {' '.join(args)} 失败: {out.stderr.strip() or out.stdout.strip()}")
         return out.stdout
 
     def list_containers(self) -> list[dict[str, Any]]:
@@ -334,7 +340,7 @@ class LocalDockerClient:
                 except DockerError:
                     pass  # 预拉失败不阻断：docker run 时会再拉
             prefix = "" if registry in {"registry-1.docker.io", "docker.io"} else f"{registry}/"
-            return f"{prefix}{repo}:{tag}@{digest}" if tag else f"{prefix}{repo}@{digest}"
+            return f"{prefix}{repo}@{digest}"
         # 兼容兑底：无 repo/tag 信息时退回完整 Image ID
         try:
             raw = self._run("images", "--digests", "--format", "{{json .}}")
@@ -540,7 +546,7 @@ class MockDockerClient:
             _, repo, tag = parse_image_spec(repo_spec)
         except ValueError:
             repo, tag = "", ""
-        return f"{repo}:{tag}@{digest}" if repo and tag else digest
+        return f"{repo}@{digest}" if repo else digest
 
     def remove_image(self, image_spec: str, digest: str, image_id: Optional[str] = None) -> bool:
         """Mock：记录清理动作。"""

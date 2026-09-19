@@ -69,12 +69,22 @@ async function updateAll() {
   try {
     log('全量手动更新开始…', 'info')
     const r = await api('/update?manual=true', { method: 'POST' })
-    const ok = r.containers.filter(c => c.result === 'updated').length
-    const rb = r.containers.filter(c => c.result === 'rolled_back').length
-    toast(`任务 #${r.job_id} 完成：成功 ${ok} · 回滚 ${rb}`)
-    log(`更新任务 #${r.job_id}：${r.containers.map(c => `${c.name}=${c.result}`).join(', ')}`, rb ? 'warn' : 'ok')
+    if (r.status === 'update already running') {
+      toast('已有更新任务在执行中，请稍后重试', true)
+      log('更新让行：已有更新任务正在运行中', 'warn')
+      return
+    }
+    const containers = r.containers || []
+    const okCount = containers.filter(c => c.result === 'updated').length
+    const rbCount = containers.filter(c => c.result === 'rolled_back').length
+    toast(`任务 #${r.job_id} 完成：成功 ${okCount} · 回滚 ${rbCount}`)
+    log(`更新任务 #${r.job_id}：${containers.map(c => `${c.name}=${c.result}`).join(', ')}`, rbCount ? 'warn' : 'ok')
     await load()
-  } catch (e) { toast('更新失败：' + e.message, true) }
+  } catch (e) {
+    const errText = e.message || '未知错误'
+    toast('更新失败：' + errText, true)
+    log(`全量更新失败：${errText}`, 'err')
+  }
 }
 
 function scanSummaryText() {

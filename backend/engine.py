@@ -257,14 +257,39 @@ class UpdateEngine:
             if self.docker.exists(name):
                 snapshot[name] = self.docker.inspect(name)
 
-        # ---- 停止：拓扑逆序（先停依赖方）；to_update 与 affected 均随计划停止 ----
+        # ---- 阶段 1：预拉取新镜像（Pre-pull） ----
+        # 在真正停止容器前，先拉取新镜像。拉取失败的容器不停止，原服务平稳运行
+        pull_failed: set[str] = set()
+        pull_errors: dict[str, str] = {}
+        for name in plan.to_update:
+            old = snapshot.get(name)
+            if not old or not old.get("image"):
+                continue
+            img = old["image"]
+            try:
+                self.docker.pull(img)
+            except Exception as e:
+                pull_failed.add(name)
+                pull_errors[name] = str(e)
+                db.log_event("err", f"拉取镜像失败 {name}：{img}（{e}），容器未停止，保持现状")
+
+        # 真正需要停止并更新的容器（排除 pull 失败的）
+        valid_to_update = plan.to_update - pull_failed
+
+        # ---- 阶段 2：停止：拓扑逆序（先停依赖方）；valid_to_update 与 affected 均随计划停止 ----
         for name in reversed(plan.order):
-            if (name in plan.to_update or name in plan.affected) and self.docker.exists(name):
+            if (name in valid_to_update or name in plan.affected) and self.docker.exists(name):
                 self.docker.stop(name)
 
-        # ---- 更新：拓扑正序，健康门控 + 失败传播 ----
-        failed_upstream: set[str] = set()
+        # ---- 阶段 3：更新：拓扑正序，健康门控 + 失败传播 ----
+        failed_upstream: set[str] = set(pull_failed)
         for name in plan.order:
+            if name in pull_failed:
+                res = ContainerJobResult(name=name, result="failed", errors=[f"pull failed: {pull_errors.get(name, '')}"])
+                res.old_digest = (snapshot.get(name, {}).get("repo_digest") or "")
+                res.old_image_id = (snapshot.get(name, {}).get("image_id") or "")
+                results.append(res)
+                continue
             if name in plan.affected and name not in plan.to_update:
                 res = ContainerJobResult(name=name, result="started")
                 try:
@@ -287,8 +312,10 @@ class UpdateEngine:
                 db.log_event("warn", f"跳过更新 {name}：上游容器失败（失败传播）")
                 # 跳过的候选按原配置重启（保持运行，PRD 失败传播语义）
                 try:
-                    if self.docker.exists(name) and snapshot[name]["running"]:
-                        self.docker.start(name)
+                    if self.docker.exists(name) and snapshot[name].get("running"):
+                        cur = self.docker.inspect(name)
+                        if not cur.get("running"):
+                            self.docker.start(name)
                 except DockerError:
                     pass
                 results.append(res)
@@ -330,7 +357,7 @@ class UpdateEngine:
         was_running = old.get("running", False)
         try:
             self.docker.pull(old_image)
-        except DockerError as e:
+        except Exception as e:
             res.errors.append(f"pull failed: {e}")
             db.log_event("err", f"拉取镜像失败 {name}：{old_image}（{e}），已恢复原状")
             self._restore(name, old)
@@ -379,9 +406,8 @@ class UpdateEngine:
                 old_image_id = None
         old_image_id = old_image_id or (old.get("image_id") or "") or None
         try:
-            self._recreate_full(name, old, image_id=old_image_id)
+            self._recreate_full(name, old, image_id=old_image_id, start=was_running)
             if was_running:
-                self.docker.start(name) if False else None
                 if not self._wait_healthy(name):
                     res.result = "failed"
                     res.errors.append("unhealthy after rollback")
@@ -422,7 +448,7 @@ class UpdateEngine:
         res.old_image_id = (old.get("image_id") or "")
         try:
             self.docker.compose_up(cspec)
-        except DockerError as e:
+        except Exception as e:
             # compose up 失败（典型：compose 文件对平台容器不可见——文件在宿主机路径），
             # 降级为"原容器完整配置 + 新镜像"重建：配置保真语义不变，更新不因 compose
             # 文件不可达而失败（compose 文件挂载进平台且路径一致的用户才走原生 compose up）
@@ -450,10 +476,11 @@ class UpdateEngine:
                         return res
                 res.result = "updated"
                 db.log_event("ok", f"更新完成 {name}（降级重建：端口/挂载/网络配置保真）")
-            except DockerError as e2:
+            except Exception as e2:
                 res.result = "failed"
                 res.errors.append(f"degraded recreate failed: {e2}")
                 db.log_event("err", f"降级重建失败 {name}：{e2}")
+                self._restore(name, old)
             return res
         if not was_running:
             # 原容器本就停止：compose up 会拉起服务，按用户意图重新停止
@@ -494,11 +521,28 @@ class UpdateEngine:
 
     def _restore(self, name: str, old: dict[str, Any]) -> None:
         try:
-            if not self.docker.exists(name) and old.get("running"):
-                self.docker.create(name, old["image"], dict(old.get("config") or {}), labels=_keep_container_labels(old.get("labels")))
+            if not old:
+                return
+            was_running = old.get("running", False)
+            if not was_running:
+                return
+            if self.docker.exists(name):
+                cur = self.docker.inspect(name)
+                if not cur.get("running"):
+                    self.docker.start(name)
+                    db.log_event("info", f"已重新启动容器 {name}（恢复运行原版本）")
+            else:
+                old_image_id = (old.get("image_id") or "") or None
+                self.docker.create(
+                    name, old["image"], dict(old.get("config") or {}),
+                    labels=_keep_container_labels(old.get("labels")),
+                    image_id=old_image_id,
+                )
                 self.docker.start(name)
-        except DockerError:
-            logger.exception("restore failed for %s", name)
+                db.log_event("info", f"已重新创建并启动容器 {name}（恢复运行原版本）")
+        except Exception as e:
+            logger.exception("restore failed for %s: %s", name, e)
+            db.log_event("err", f"恢复容器 {name} 失败：{e}")
 
     def _wait_healthy(self, name: str) -> bool:
         if self.health_wait_sec <= 0:
@@ -877,10 +921,12 @@ def run_update(
             notify_job_result(out)
             return out
         except Exception as e:
+            err_msg = str(e)
+            db.log_event("err", f"更新任务 #{job_id} 执行异常：{err_msg}")
             with db.tx() as conn:
                 conn.execute(
                     "UPDATE jobs SET status='failed', result=?, finished_at=? WHERE id=?",
-                    (db.jdump({"error": str(e)}), db.now_iso(), job_id),
+                    (db.jdump({"error": err_msg}), db.now_iso(), job_id),
                 )
             raise
     finally:

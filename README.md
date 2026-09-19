@@ -47,7 +47,7 @@ python run.py
 
 ## Docker 部署
 
-镜像已发布至 Docker Hub：[learycn/containerup](https://hub.docker.com/r/learycn/containerup)，由 GitHub Actions 自动构建推送：推送 `main` → 重建 `latest`；推送 `v*` 版本 tag（如 `v1.1.1`）→ 生成 `1.1.1` / `1.1` / `latest` 三个镜像标签。
+镜像已发布至 Docker Hub：[learycn/containerup](https://hub.docker.com/r/learycn/containerup)，由 GitHub Actions 自动构建推送：推送 `main` → 重建 `latest`；推送 `v*` 版本 tag（如 `v1.1.2`）→ 生成 `1.1.2` / `1.1` / `latest` 三个镜像标签。
 
 ```bash
 docker run -d \

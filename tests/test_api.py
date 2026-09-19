@@ -253,5 +253,6 @@ class TestWatchesAndSettings:
         assert tc.post("/api/channels", json={"kind": "webhook", "name": "n1", "url": "http://127.0.0.1:9/x"}).status_code == 200
         assert tc.post("/api/channels", json={"kind": "wecom", "name": "企微", "url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=x"}).status_code == 200
         assert tc.post("/api/channels", json={"kind": "bogus", "name": "n2", "url": "http://x"}).status_code == 422
+        assert tc.post("/api/channels/test", json={"kind": "bogus", "url": "http://x"}).status_code == 422
         assert len(tc.get("/api/channels").json()) == 2
         assert tc.delete("/api/channels/1").status_code == 200

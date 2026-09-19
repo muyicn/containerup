@@ -53,6 +53,12 @@ class TestRunArgsFromConfig:
         args = run_args_from_config(_cfg(restart={"Name": "on-failure", "MaximumRetryCount": 5}))
         assert "--restart" in args and "on-failure:5" in args
 
+    def test_bridge_network_skips_ip(self):
+        args = run_args_from_config(_cfg(network_mode="bridge", ipam_v4="172.17.0.5"))
+        s = " ".join(args)
+        assert "--ip" not in s
+        assert "--network-alias" not in s
+
     def test_empty_config(self):
         assert run_args_from_config({}, None) == []
 

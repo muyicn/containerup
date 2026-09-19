@@ -15,7 +15,7 @@ _TMP = tempfile.mkdtemp(prefix="vt-test-")
 os.environ["VT_DB_PATH"] = os.path.join(_TMP, "test.db")
 os.environ["VT_DEMO_MODE"] = "0"
 os.environ["VT_DEMO_SEED"] = "0"
-os.environ["VT_JWT_SECRET"] = "test-secret-key-for-pytest-only"
+os.environ["VT_JWT_SECRET"] = "test-secret-key-for-pytest-only-32bytes"
 os.environ["VT_REGISTRY_TIMEOUT"] = "5"
 
 import pytest  # noqa: E402

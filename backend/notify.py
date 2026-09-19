@@ -157,8 +157,10 @@ def _wecom_payload(text: str) -> dict[str, Any]:
 
 def _deliver_channel(ch: dict[str, Any], text: str, summary: dict[str, Any]) -> bool:
     try:
-        if ch["kind"] in ("dingtalk", "feishu"):
+        if ch["kind"] == "dingtalk":
             body = {"msgtype": "text", "text": {"content": text}}
+        elif ch["kind"] == "feishu":
+            body = {"msg_type": "text", "content": {"text": text}}
         elif ch["kind"] == "wecom":
             # 企业微信机器人 webhook：markdown 消息（text 不会被 @ 提醒，markdown 展示更佳）
             body = _wecom_payload(text)
@@ -167,11 +169,13 @@ def _deliver_channel(ch: dict[str, Any], text: str, summary: dict[str, Any]) -> 
         with httpx.Client(timeout=CONFIG.CHANNEL_TIMEOUT_SEC) as client:
             resp = client.post(ch["url"], json=body)
             if resp.status_code < 300:
-                # 企业微信成功响应 errcode=0；非 0 视为失败
                 try:
                     data = resp.json()
-                    if ch["kind"] == "wecom" and data.get("errcode", 0) != 0:
-                        logger.warning("wecom delivery rejected: %s", data)
+                    if ch["kind"] in ("wecom", "dingtalk") and data.get("errcode", 0) != 0:
+                        logger.warning("%s delivery rejected: %s", ch["kind"], data)
+                        return False
+                    if ch["kind"] == "feishu" and (data.get("code", 0) != 0 or data.get("StatusCode", 0) != 0):
+                        logger.warning("feishu delivery rejected: %s", data)
                         return False
                 except ValueError:
                     pass

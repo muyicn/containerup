@@ -116,11 +116,21 @@ async function update() {
   try {
     log(`手动更新 ${props.c.name} …`)
     const r = await api(`/containers/${props.c.name}/update`, { method: 'POST' })
-    const mine = r.containers.find(x => x.name === props.c.name)
-    toast(`任务 #${r.job_id}：${props.c.name} → ${mine ? mine.result : '无结果'}`)
-    log(`更新任务 #${r.job_id}：${r.containers.map(x => `${x.name}=${x.result}`).join(', ')}`, mine?.result === 'rolled_back' ? 'warn' : 'ok')
+    if (r.status === 'update already running') {
+      toast('已有更新任务在执行中，请稍后重试', true)
+      log('更新让行：已有更新任务正在执行中', 'warn')
+      return
+    }
+    const containers = r.containers || []
+    const mine = containers.find(x => x.name === props.c.name)
+    toast(`任务 #${r.job_id}：${props.c.name} → ${mine ? mine.result : '已执行'}`)
+    log(`更新任务 #${r.job_id}：${containers.map(x => `${x.name}=${x.result}`).join(', ')}`, mine?.result === 'rolled_back' ? 'warn' : 'ok')
     emit('refresh')
-  } catch (e) { toast('更新失败：' + e.message, true); log(`更新失败：${e.message}`, 'err') }
+  } catch (e) {
+    const errText = e.message || '未知错误'
+    toast('更新失败：' + errText, true)
+    log(`更新失败：${errText}`, 'err')
+  }
 }
 
 async function simFail() {

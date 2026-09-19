@@ -30,6 +30,10 @@ frontend/node_modules/
 *.pem
 *.key
 
+# 脚本与本地发布凭据
+upload.bat
+upload.ps1
+
 # 编辑器
 .vscode/
 .idea/

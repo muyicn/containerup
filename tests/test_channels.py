@@ -97,3 +97,98 @@ class TestWecomChannel:
         assert "容器守望者通知" in content
         assert "测试消息内容" in content
         db.setting_set("public_base_url", "")
+
+
+class TestDingtalkChannel:
+    def _add_channel(self, url):
+        with db.tx() as conn:
+            conn.execute(
+                "INSERT INTO channels(kind, name, url, enabled) VALUES('dingtalk','test-dt',?,1)",
+                (url,),
+            )
+
+    def test_dingtalk_sends_text(self, wecom_server):
+        self._add_channel(wecom_server)
+        ok = notify.deliver("钉钉消息内容", {"count": 1})
+        assert list(ok.values()) == [True]
+        body = EchoHandler.received[0]
+        assert body["msgtype"] == "text"
+        assert body["text"]["content"] == "钉钉消息内容"
+
+    def test_dingtalk_errcode_nonzero_fails(self, wecom_server):
+        self._add_channel(wecom_server)
+        orig = EchoHandler.do_POST
+
+        def fail_post(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            resp = json.dumps({"errcode": 300001, "errmsg": "token is not valid"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+        EchoHandler.do_POST = fail_post
+        try:
+            ok = notify.deliver("x", {})
+            assert list(ok.values()) == [False]
+        finally:
+            EchoHandler.do_POST = orig
+
+
+class TestFeishuChannel:
+    def _add_channel(self, url):
+        with db.tx() as conn:
+            conn.execute(
+                "INSERT INTO channels(kind, name, url, enabled) VALUES('feishu','test-fs',?,1)",
+                (url,),
+            )
+
+    def test_feishu_sends_msg_type_and_content(self, wecom_server):
+        self._add_channel(wecom_server)
+        # 模拟飞书成功响应
+        orig = EchoHandler.do_POST
+
+        def fs_post(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            EchoHandler.received.append(body)
+            resp = json.dumps({"code": 0, "msg": "success"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+        EchoHandler.do_POST = fs_post
+        try:
+            ok = notify.deliver("飞书消息内容", {"count": 1})
+            assert list(ok.values()) == [True]
+            body = EchoHandler.received[0]
+            assert body["msg_type"] == "text"
+            assert body["content"]["text"] == "飞书消息内容"
+        finally:
+            EchoHandler.do_POST = orig
+
+    def test_feishu_code_nonzero_fails(self, wecom_server):
+        self._add_channel(wecom_server)
+        orig = EchoHandler.do_POST
+
+        def fail_post(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            resp = json.dumps({"code": 19001, "msg": "bad request"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+        EchoHandler.do_POST = fail_post
+        try:
+            ok = notify.deliver("x", {})
+            assert list(ok.values()) == [False]
+        finally:
+            EchoHandler.do_POST = orig
+

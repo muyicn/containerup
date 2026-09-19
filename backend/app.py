@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
     scheduler.stop()
 
 
-app = FastAPI(title="容器守望者", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="容器守望者", version="1.1.2", lifespan=lifespan)
 
 
 # ---------- 认证依赖 ----------
@@ -111,11 +111,6 @@ class TestChannelBody(BaseModel):
         if v not in ("webhook", "dingtalk", "feishu", "wecom"):
             raise ValueError("invalid channel kind")
         return v
-
-
-class TestChannelBody(BaseModel):
-    url: str
-    kind: str = "webhook"
 
 
 class SettingsBody(BaseModel):
@@ -335,12 +330,18 @@ def update_container(name: str, user: str = Depends(require_auth)) -> dict[str, 
     row = db.query_one("SELECT * FROM containers WHERE name=?", (name,))
     if not row:
         raise HTTPException(status_code=404, detail="not found")
-    return engine.run_update(DOCKER, names=[name], health_wait_sec=_health_wait())
+    try:
+        return engine.run_update(DOCKER, names=[name], health_wait_sec=_health_wait())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"更新执行失败: {e}")
 
 
 @app.post("/api/update")
 def update_all(manual: bool = True, user: str = Depends(require_auth)) -> dict[str, Any]:
-    return engine.run_update(DOCKER, manual=manual, health_wait_sec=_health_wait())
+    try:
+        return engine.run_update(DOCKER, manual=manual, health_wait_sec=_health_wait())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"更新执行失败: {e}")
 
 
 @app.get("/api/containers/{name}/versions")

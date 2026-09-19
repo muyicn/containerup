@@ -134,8 +134,9 @@ def version_by_digest(spec: str, digest: Optional[str]) -> str:
     缓存策略：digest→版本 持久缓存（版本号 tag 指向固定）；确认无匹配缓存空串
     1 小时（避免每轮重复拉 tags 列表，同时新 tag 推送后能自动补上）；
     网络失败不缓存，下轮自愈。仅支持 Docker Hub，其他 registry 返回空串。
+    演示模式（DEMO_MODE）直接返回空，避免无外网环境下的连接超时。
     """
-    if not digest:
+    if not digest or CONFIG.DEMO_MODE:
         return ""
     registry, repo, _ = parse_image_spec(spec)
     if registry not in {"docker.io", "registry-1.docker.io"}:
