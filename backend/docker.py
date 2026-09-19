@@ -29,6 +29,47 @@ MANAGED_LABEL = "dev.containerup.managed"
 _VERSION_LABELS = ("org.opencontainers.image.version", "org.label-schema.version")
 
 
+def is_self_container(c: Optional[dict[str, Any]]) -> bool:
+    """判断给定容器是否为 ContainerUp 自身运行实例。
+
+    判定准则（满足任意一项即确认为自身容器）：
+    1. 容器显式带有标签 dev.containerup.self=true；
+    2. 容器名称为 containerup 或 vigiltainer（或匹配环境变量 VT_SELF_NAME / CONTAINER_NAME）；
+    3. 容器主机名（Hostname）或容器 ID 前缀与当前系统 Hostname 精确匹配（Docker 默认以 short container ID 作为容器主机名）；
+    4. 容器镜像名属于 containerup 或 vigiltainer（如 learycn/containerup、muyicn/containerup 等）。
+    """
+    if not c or not isinstance(c, dict):
+        return False
+    labels = c.get("labels") or {}
+    if str(labels.get("dev.containerup.self", "")).strip().lower() == "true":
+        return True
+
+    name = str(c.get("name") or "").strip().lower().lstrip("/")
+    if name in ("containerup", "vigiltainer"):
+        return True
+
+    import os, socket
+    self_env = (os.environ.get("VT_SELF_NAME") or os.environ.get("CONTAINER_NAME") or "").strip().lower()
+    if self_env and name == self_env:
+        return True
+
+    # 容器 Hostname 或 ID 前缀匹配本机系统 Hostname（Docker 默认 short container id 即 hostname）
+    my_hostname = (os.environ.get("HOSTNAME") or socket.gethostname() or "").strip().lower()
+    if my_hostname and len(my_hostname) >= 4:
+        cfg_host = str((c.get("config") or {}).get("hostname") or "").strip().lower()
+        if cfg_host and cfg_host == my_hostname:
+            return True
+        cid = str(c.get("id") or "").strip().lower()
+        if cid and (cid.startswith(my_hostname) or my_hostname.startswith(cid[:12])):
+            return True
+
+    img = str(c.get("image") or "").strip().lower()
+    if any(k in img for k in ("learycn/containerup", "muyicn/containerup", "containerup:")):
+        return True
+
+    return False
+
+
 def _label_version(labels: Optional[dict[str, str]]) -> str:
     for k in _VERSION_LABELS:
         v = (labels or {}).get(k)
@@ -285,6 +326,7 @@ class LocalDockerClient:
         ep = networks.get(nm) or (next(iter(networks.values())) if len(networks) == 1 else None) or {}
         return {
             "name": (data.get("Name") or "").lstrip("/"),
+            "id": data.get("Id") or "",
             "image": image_spec,
             "image_id": image_id,
             # manifest 摘要（pull 时记录）：与 registry 检测同口径，用于更新对比；
@@ -540,6 +582,7 @@ class MockDockerClient:
     ) -> None:
         self._containers[name] = {
             "name": name,
+            "id": _fake_digest(name)[:12],
             "image": image,
             "image_id": _fake_digest(image),
             "repo_digest": _fake_digest(image),
@@ -649,6 +692,7 @@ class MockDockerClient:
             lbls["dev.containerup.canonical_image"] = image
         self._containers[name] = {
             "name": name,
+            "id": _fake_digest(name)[:12],
             "image": image,
             "image_id": image_id or self.pull(image),
             "repo_digest": image_id or self.pull(image),

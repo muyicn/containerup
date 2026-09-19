@@ -1,3 +1,13 @@
+---
+AIGC:
+  ContentProducer: '001191110102MAD55U9H0F10002'
+  ContentPropagator: '001191110102MAD55U9H0F10002'
+  Label: '1'
+  ProduceID: '97044efe-4586-4011-a31b-44af2eb7d2ac'
+  PropagateID: '97044efe-4586-4011-a31b-44af2eb7d2ac'
+  ReservedCode1: '904af496-9fc2-4e26-96e2-cd60fa8b697a'
+  ReservedCode2: '904af496-9fc2-4e26-96e2-cd60fa8b697a'
+---
 
 # 容器守望者 (ContainerUp)
 
@@ -8,24 +18,29 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Docker-learycn%2Fcontainerup-blue?logo=docker" alt="Docker Image" />
-  <img src="https://img.shields.io/badge/Version-v1.1.5-emerald" alt="Version" />
-  <img src="https://img.shields.io/badge/Tests-131%20passed-brightgreen" alt="Tests" />
+  <img src="https://img.shields.io/badge/Version-v1.1.6-emerald" alt="Version" />
+  <img src="https://img.shields.io/badge/Tests-137%20passed-brightgreen" alt="Tests" />
   <img src="https://img.shields.io/badge/License-MIT-slate" alt="License" />
 </p>
 
 ---
 
-
 ## 📖 平台简介
 
 **ContainerUp（容器守望者）** 融合了自动更新执行引擎与双模式版本检测机制。不同于传统的 Watchtower 等简单粗暴的更新工具，ContainerUp 聚焦于**高保真配置重建**、**拓扑依赖感知**、**智能健康门控**与**秒级自动/手动回滚**，保证您在家用 NAS 或私有服务器上的关键容器永远稳定可用。
 
-<img width="1862" height="1099" alt="Image" src="https://github.com/user-attachments/assets/920f42db-cf6d-4c7b-9666-bf0683344d13" />
 ---
 
 ## 🌟 核心功能特性清单
 
 ### 1. 🚀 智能更新引擎 (Update Engine)
+- **扫描后自动联动更新 (Scan-to-Update)**：
+  - 无论是定时计划调度还是手动在前端点击“立即扫描”，一旦检测到可用更新且容器开启了自动更新，立即按依赖拓扑顺序自动执行平滑重建，真正做到“发现更新即自动更新”；
+  - 新纳管容器默认策略自动开启自动更新（开箱即用），省去手动逐个配置开关的繁琐操作。
+- **ContainerUp 自身容器防自杀与独立解耦守护自更 (Self-Protection & Detached Self-Updater)**：
+  - **防自杀保护**：平台运行时精准识别 ContainerUp 自身的容器实例，自动豁免定时调度与批量“全部更新”中的 inline stop 流程，杜绝传统 Docker-in-Docker 工具停止自身容器导致服务断流瘫痪的死锁痛点；
+  - **独立解耦守护自更**：卡片单独提供“守护自更”能力，通过 Docker Socket 派发短暂的独立辅助守护容器完成 ContainerUp 的秒级平滑重建与重启；
+  - **宿主机命令一键查看**：卡片提供“查看更新命令”功能，一键生成并复制当前容器在宿主机上的标准 Docker CLI 及 Docker Compose 更新命令，方便直接在终端维护。
 - **Compose 项目拓扑感知**：自动读取容器 Compose 元数据与 `depends_on` 依赖关系，按依赖树精准确定重建顺序（先停依赖者，先起被依赖者）。
 - **群晖 DSM 与 NAS 降级高保真重建**：
   - 针对群晖 Container Manager 屏蔽 compose 物理文件路径的场景，自动降级为全量运行时配置反解；

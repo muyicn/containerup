@@ -298,6 +298,57 @@ def container_detail(name: str, user: str = Depends(require_auth)) -> dict[str, 
     return row
 
 
+@app.get("/api/containers/{name}/update_command")
+def get_update_command(name: str, user: str = Depends(require_auth)) -> dict[str, Any]:
+    """生成容器更新的手动 CLI / Docker Compose 命令（便于宿主机直接执行或排查）。"""
+    row = db.query_one("SELECT * FROM containers WHERE name=?", (name,))
+    if not row:
+        raise HTTPException(status_code=404, detail="not found")
+    try:
+        inspect_data = DOCKER.inspect(name)
+    except Exception:
+        inspect_data = {}
+
+    compose_id = row.get("compose_id") or ""
+    service = row.get("service") or ""
+    image_spec = row.get("image_spec") or ""
+
+    labels = inspect_data.get("labels") or {}
+    from backend.docker import compose_spec, run_args_from_config
+    cspec = compose_spec(labels)
+
+    commands: dict[str, str] = {}
+    if cspec:
+        project = cspec.get("project") or compose_id
+        files = cspec.get("files") or []
+        workdir = cspec.get("workdir") or ""
+        f_args = " ".join(f"-f {f}" for f in files) if files else ""
+        wd_arg = f"--project-directory {workdir}" if workdir else ""
+        base_cmd = f"docker compose -p {project} {f_args} {wd_arg}".strip()
+        commands["compose"] = f"{base_cmd} pull {service} && {base_cmd} up -d --no-deps {service}".replace("  ", " ")
+        if workdir:
+            commands["compose_cd"] = f"cd {workdir} && docker compose pull {service} && docker compose up -d --no-deps {service}"
+
+    try:
+        config = inspect_data.get("config") or {}
+        run_args = run_args_from_config(config, labels)
+        cmd_part = " ".join(config.get("cmd") or [])
+        run_str = f"docker run -d --name {name} " + " ".join(run_args) + f" {image_spec}"
+        if cmd_part:
+            run_str += f" {cmd_part}"
+        commands["docker_run"] = f"docker pull {image_spec} && docker stop {name} && docker rm {name} && {run_str}"
+    except Exception:
+        pass
+
+    return {
+        "name": name,
+        "is_self": bool(row.get("is_self")),
+        "is_compose": bool(cspec or compose_id),
+        "image_spec": image_spec,
+        "commands": commands,
+    }
+
+
 @app.put("/api/containers/{name}/mode")
 def set_mode(name: str, body: ModeBody, user: str = Depends(require_auth)) -> dict[str, Any]:
     with db.tx() as conn:
@@ -472,8 +523,16 @@ def del_watch(wid: int, user: str = Depends(require_auth)) -> dict[str, Any]:
 # ---------- 扫描 ----------
 
 @app.post("/api/scan")
-def do_scan(force: bool = False, user: str = Depends(require_auth)) -> dict[str, Any]:
-    return detect.scan(DOCKER, force=force)
+def do_scan(force: bool = False, auto_update: bool = False, user: str = Depends(require_auth)) -> dict[str, Any]:
+    res = detect.scan(DOCKER, force=force)
+    auto_upd_setting = db.setting_get("auto_update_after_scan", "1")
+    if auto_update and auto_upd_setting == "1" and engine.auto_update_pending(DOCKER):
+        try:
+            upd_res = engine.run_update(DOCKER, manual=False, health_wait_sec=_health_wait())
+            res["update"] = upd_res
+        except Exception as e:
+            res["update_error"] = str(e)
+    return res
 
 
 @app.get("/api/scheduler")
@@ -572,7 +631,16 @@ def list_logs(user: str = Depends(require_auth), limit: int = 200) -> list[dict]
 
 # ---------- 设置 ----------
 
-_ALLOWED_SETTINGS = {"delay_update_sec", "scan_interval_sec", "registry_mirror", "demo_failure", "public_base_url", "health_wait_sec"}
+_ALLOWED_SETTINGS = {
+    "delay_update_sec",
+    "scan_interval_sec",
+    "registry_mirror",
+    "demo_failure",
+    "public_base_url",
+    "health_wait_sec",
+    "auto_update_after_scan",
+    "default_update_enabled",
+}
 
 
 def _health_wait() -> int:
@@ -585,7 +653,12 @@ def _health_wait() -> int:
 
 @app.get("/api/settings")
 def get_settings(user: str = Depends(require_auth)) -> dict[str, Any]:
-    rows = db.query("SELECT key, value FROM settings WHERE key IN ('delay_update_sec','scan_interval_sec','registry_mirror','public_base_url','health_wait_sec')")
+    rows = db.query(
+        "SELECT key, value FROM settings WHERE key IN ("
+        "'delay_update_sec','scan_interval_sec','registry_mirror','public_base_url',"
+        "'health_wait_sec','auto_update_after_scan','default_update_enabled'"
+        ")"
+    )
     return {r["key"]: r["value"] for r in rows}
 
 

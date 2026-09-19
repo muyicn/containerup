@@ -60,7 +60,8 @@ def init_db() -> None:
                 delay_update_for INTEGER,
                 updated_at TEXT,
                 local_image INTEGER NOT NULL DEFAULT 0,
-                protected INTEGER NOT NULL DEFAULT 0
+                protected INTEGER NOT NULL DEFAULT 0,
+                is_self INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS watches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,11 +150,19 @@ def init_db() -> None:
             if col not in container_cols:
                 _CONN.execute(f"ALTER TABLE containers ADD COLUMN {col} TEXT")
                 _CONN.commit()
+        # 轻量迁移：旧库 containers 表补 is_self 列（标记 ContainerUp 自身容器）
+        if "is_self" not in container_cols:
+            _CONN.execute("ALTER TABLE containers ADD COLUMN is_self INTEGER NOT NULL DEFAULT 0")
+            _CONN.commit()
         # 轻量迁移：版本台账表补 version 列
         version_cols = {r["name"] for r in _CONN.execute("PRAGMA table_info(container_versions)").fetchall()}
         if "version" not in version_cols:
             _CONN.execute("ALTER TABLE container_versions ADD COLUMN version TEXT")
             _CONN.commit()
+        # 默认策略项初始化：自动更新联动与默认开启自动更新（开箱即用）
+        for k, v in (("auto_update_after_scan", "1"), ("default_update_enabled", "1")):
+            _CONN.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (k, v))
+        _CONN.commit()
 
 
 def get_conn() -> sqlite3.Connection:

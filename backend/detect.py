@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from backend import db, notify
 from backend.config import CONFIG
+from backend.docker import is_self_container
 from backend.engine import (
     COMPOSE_PROJECT_LABEL,
     COMPOSE_SERVICE_LABEL,
@@ -91,7 +92,10 @@ def _sync_containers(docker_client: Any) -> dict[str, dict[str, Any]]:
         labels = c.get("labels") or {}
         compose_id = get_compose_id(c) or ""
         service = get_service_name(c) or ""
-        protected = 1 if labels.get(PROTECTED_LABEL, "").lower() == "true" else 0
+        is_self = 1 if is_self_container(c) else 0
+        protected = 1 if (is_self or labels.get(PROTECTED_LABEL, "").lower() == "true") else 0
+        # 默认自动更新开关：自身容器强制为 0（避免自更自杀），普通容器读取系统策略 default_update_enabled（默认 1 开启）
+        def_auto = 0 if is_self else (1 if db.setting_get("default_update_enabled", "1") == "1" else 0)
         image_spec = c.get("image", "")
         # 容器 Config.Image 可能退化为镜像 ID 或 tag@digest 引用（回退定向重建后）；
         # 检测必须用 tag 引用 → 保留 DB 里原有 image_spec，不用这类引用覆盖
@@ -110,18 +114,20 @@ def _sync_containers(docker_client: Any) -> dict[str, dict[str, Any]]:
             conn.execute(
                 """
                 INSERT INTO containers(name, image_spec, compose_id, service, mode,
-                    check_enabled, update_enabled, protected, local_digest, local_version)
-                VALUES(?,?,?,?,?,1,0,?,?,?)
+                    check_enabled, update_enabled, protected, local_digest, local_version, is_self)
+                VALUES(?,?,?,?,?,1,?,?,?,?,?)
                 ON CONFLICT(name) DO UPDATE SET
                     image_spec=excluded.image_spec,
                     compose_id=excluded.compose_id,
                     service=excluded.service,
-                    protected=excluded.protected,
+                    protected=CASE WHEN excluded.is_self=1 THEN 1 ELSE excluded.protected END,
+                    update_enabled=CASE WHEN excluded.is_self=1 THEN 0 ELSE containers.update_enabled END,
+                    is_self=excluded.is_self,
                     local_digest=excluded.local_digest,
                     local_version=excluded.local_version
                 """,
-                (name, image_spec, compose_id, service, "auto", protected,
-                 repo_digest or None, image_version or None),
+                (name, image_spec, compose_id, service, "auto", def_auto, protected,
+                 repo_digest or None, image_version or None, is_self),
             )
     # 宿主机已物理移除（docker rm / compose down）的容器：从监控台账中同步清理，杜绝幽灵容器
     rows = db.query("SELECT name FROM containers")

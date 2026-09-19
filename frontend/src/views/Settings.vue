@@ -5,7 +5,13 @@ import { api } from '../api'
 import Icon from '../components/Icon.vue'
 
 const channels = ref([])
-const settings = reactive({ delay_update_sec: '0', scan_interval_sec: '0', public_base_url: '' })
+const settings = reactive({
+  delay_update_sec: '0',
+  scan_interval_sec: '0',
+  public_base_url: '',
+  auto_update_after_scan: '1',
+  default_update_enabled: '1',
+})
 const chForm = reactive({ kind: 'webhook', name: '', url: '' })
 const pwdForm = reactive({ old_password: '', new_password: '', confirm: '' })
 const pwdBusy = ref(false)
@@ -16,6 +22,8 @@ async function load() {
   settings.delay_update_sec = s.delay_update_sec || '0'
   settings.scan_interval_sec = s.scan_interval_sec || '0'
   settings.public_base_url = s.public_base_url || ''
+  settings.auto_update_after_scan = s.auto_update_after_scan !== undefined ? s.auto_update_after_scan : '1'
+  settings.default_update_enabled = s.default_update_enabled !== undefined ? s.default_update_enabled : '1'
 }
 
 async function addChannel() {
@@ -54,9 +62,11 @@ async function saveSettings() {
       delay_update_sec: String(parseInt(settings.delay_update_sec) || 0),
       scan_interval_sec: String(parseInt(settings.scan_interval_sec) || 0),
       public_base_url: settings.public_base_url.trim(),
+      auto_update_after_scan: settings.auto_update_after_scan === '1' ? '1' : '0',
+      default_update_enabled: settings.default_update_enabled === '1' ? '1' : '0',
     } }) })
     toast('已保存，立即生效')
-    log(`策略已保存：检测间隔 ${settings.scan_interval_sec}s · 发布延迟 ${settings.delay_update_sec}s · Logo 地址 ${settings.public_base_url.trim() || '未配置'}`)
+    log(`策略已保存：检测间隔 ${settings.scan_interval_sec}s · 发布延迟 ${settings.delay_update_sec}s · 扫描后自动更新 ${settings.auto_update_after_scan === '1' ? '开' : '关'} · 默认开启自动更新 ${settings.default_update_enabled === '1' ? '开' : '关'}`)
   } catch (e) { toast(e.message, true) }
 }
 
@@ -129,7 +139,23 @@ onMounted(load)
       <h3 class="flex items-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-200 mb-4">
         <Icon name="gear" cls="w-4 h-4 text-brand-500" /> 更新策略
       </h3>
-      <div class="space-y-3">
+      <div class="space-y-4">
+        <div class="flex items-center gap-3 flex-wrap">
+          <label class="text-[13px] text-slate-500 dark:text-slate-400 w-36 shrink-0">扫描联动自动更新</label>
+          <label class="flex items-center gap-2 cursor-pointer select-none">
+            <input type="checkbox" v-model="settings.auto_update_after_scan" true-value="1" false-value="0"
+              class="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-brand-600 focus:ring-brand-500" />
+            <span class="text-xs text-slate-700 dark:text-slate-300 font-medium">发现新版本后自动开始执行更新</span>
+          </label>
+        </div>
+        <div class="flex items-center gap-3 flex-wrap">
+          <label class="text-[13px] text-slate-500 dark:text-slate-400 w-36 shrink-0">新容器默认策略</label>
+          <label class="flex items-center gap-2 cursor-pointer select-none">
+            <input type="checkbox" v-model="settings.default_update_enabled" true-value="1" false-value="0"
+              class="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-brand-600 focus:ring-brand-500" />
+            <span class="text-xs text-slate-700 dark:text-slate-300 font-medium">新纳管容器默认开启自动更新（ContainerUp 自身容器仍保持安全豁免）</span>
+          </label>
+        </div>
         <div class="flex items-center gap-3 flex-wrap">
           <label class="text-[13px] text-slate-500 dark:text-slate-400 w-36 shrink-0">自动检测间隔（秒）</label>
           <input v-model="settings.scan_interval_sec" type="number" min="0" class="input !w-28" />
@@ -138,9 +164,11 @@ onMounted(load)
           <label class="text-[13px] text-slate-500 dark:text-slate-400 w-36 shrink-0">全局发布延迟（秒）</label>
           <input v-model="settings.delay_update_sec" type="number" min="0" class="input !w-28" />
         </div>
-        <button @click="saveSettings()" class="btn-primary">保存</button>
+        <button @click="saveSettings()" class="btn-primary">保存策略</button>
       </div>
-      <p class="mt-2.5 text-[11.5px] text-slate-400 leading-5">
+      <p class="mt-3 text-[11.5px] text-slate-400 leading-5">
+        联动更新：无论是定时调度还是手动点击扫描，一旦发现新镜像且容器已开启自动更新，立即按依赖拓扑顺序执行无缝重建。<br />
+        自身保护：ContainerUp 会精准识别自身运行实例并排除在自动/批量更新之外，杜绝因自身停止导致的更新中断死锁。<br />
         检测间隔：每 N 秒自动扫描并在候选就绪时执行自动更新（0 = 仅手动）；保存后立即生效，无需重启。<br />
         发布延迟：新镜像发布后等待 N 秒才进入自动更新候选（0 = 禁用）。
       </p>

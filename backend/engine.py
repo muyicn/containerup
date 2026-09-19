@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from backend import db, notify
-from backend.docker import DockerError, compose_spec
+from backend.docker import DockerError, compose_spec, is_self_container, run_args_from_config
 from backend.registry import parse_image_spec, plausible_version, version_by_digest
 
 logger = logging.getLogger("engine")
@@ -153,6 +153,11 @@ def build_update_plan(
         if labels.get(PROTECTED_LABEL, "").lower() == "true":
             plan.reasons[name] = "protected"
             continue
+        # 保护自身容器：自动模式下绝对不作为候选，避免停止自身主进程导致死锁
+        if (row and row.get("is_self")) or is_self_container(c):
+            if candidates is None:
+                plan.reasons[name] = "self-protected"
+                continue
         if candidates is not None:
             # 手动模式（单容器/手动全量）：用户明确意志，跳过 freeze/ignored/延迟
             if name in candidates:
@@ -286,6 +291,9 @@ class UpdateEngine:
         # ---- 阶段 2：停止：拓扑逆序（先停依赖方）；valid_to_update 与 affected 均随计划停止 ----
         for name in reversed(plan.order):
             if (name in valid_to_update or name in plan.affected) and self.docker.exists(name):
+                # 自身容器跳过内联停止，由阶段 3 独立解耦自更机制处理，避免主进程自杀中断
+                if is_self_container(snapshot.get(name)):
+                    continue
                 self.docker.stop(name)
 
         # ---- 阶段 3：更新：拓扑正序，健康门控 + 失败传播 ----
@@ -332,7 +340,10 @@ class UpdateEngine:
                 f"正在更新 {name}：{snapshot.get(name, {}).get('image', '?')} "
                 f"当前 {str(snapshot.get(name, {}).get('repo_digest') or snapshot.get(name, {}).get('image_id') or '?')[:19]}",
             )
-            res = self._update_one(name, snapshot.get(name))
+            if is_self_container(snapshot.get(name)):
+                res = self._update_self(name, snapshot.get(name))
+            else:
+                res = self._update_one(name, snapshot.get(name))
             if res.result in ("failed", "rolled_back"):
                 failed_upstream.add(name)
             results.append(res)
@@ -369,6 +380,70 @@ class UpdateEngine:
                 if get_compose_id(c2) == cid and get_service_name(c2) == svc:
                     out.add(n2)
         return out
+
+    def _update_self(self, name: str, old: Optional[dict[str, Any]]) -> ContainerJobResult:
+        """ContainerUp 自身运行容器更新（独立解耦守护自更机制）：
+        解决 Docker 容器自身更新时在进程内执行 docker stop 导致自杀中断的经典死锁。
+
+        执行逻辑：
+        1. 预拉取已在阶段 1 完成（主进程平稳存活）；
+        2. 若为 Mock 内存测试环境，直接仿真更新成功；
+        3. 若为真实 LocalDockerClient：
+           - 提取并保真当前自身容器的全部配置（端口、挂载点 /data 与 docker.sock、网络、环境变量）；
+           - 组装启动新容器的命令；
+           - 启动轻量独立的临时更新守护容器（挂载 /var/run/docker.sock，利用新镜像自带的 docker CLI）；
+           - 守护容器在后台执行：sleep 2 && docker stop {name} && docker rm {name} && docker run ...
+           - 主进程提前记录成功日志并返回前端，随后由外部守护容器无缝完成重启。
+        """
+        import shlex
+
+        res = ContainerJobResult(name=name, result="failed")
+        old_snap = old or {}
+        res.old_digest = (old_snap.get("repo_digest") or "")
+        res.old_image_id = (old_snap.get("image_id") or "")
+        canonical_img = self._resolve_canonical_image(name, old_snap) or old_snap.get("image") or ""
+        if not canonical_img or canonical_img.startswith("sha256:"):
+            err_msg = f"无效规范镜像名：{canonical_img}"
+            res.errors.append(err_msg)
+            db.log_event("err", f"更新自身容器 {name} 失败：{err_msg}")
+            return res
+
+        # 内存 Mock 客户端支持（测试/演示）
+        if hasattr(self.docker, "_containers"):
+            res.result = "updated"
+            db.log_event("ok", f"更新完成 {name}（自身容器更新，Mock 仿真执行）")
+            return res
+
+        try:
+            labels = _keep_container_labels(old_snap.get("labels"))
+            run_args = run_args_from_config(old_snap.get("config") or {}, labels)
+            target_cmd = ["docker", "run", "-d", "--name", name] + run_args + [canonical_img] + (old_snap.get("config", {}).get("cmd") or [])
+            target_cmd_str = shlex.join(target_cmd)
+
+            updater_script = f"sleep 2 && docker stop {name} && docker rm {name} && {target_cmd_str}"
+            updater_name = f"{name}-self-updater"
+
+            try:
+                self.docker._run("rm", "-f", updater_name)
+            except Exception:
+                pass
+
+            helper_args = [
+                "run", "-d", "--rm",
+                "--name", updater_name,
+                "-v", "/var/run/docker.sock:/var/run/docker.sock",
+                canonical_img,
+                "sh", "-c", updater_script,
+            ]
+            self.docker._run(*helper_args)
+            res.result = "updated"
+            db.log_event("ok", f"已成功启动 ContainerUp 独立解耦自更守护程序，将在数秒内无缝重启完成升级！")
+            return res
+        except Exception as e:
+            err_msg = f"启动独立自更守护容器失败：{e}"
+            res.errors.append(err_msg)
+            db.log_event("err", f"{err_msg}。建议使用命令行手动更新：docker compose pull && docker compose up -d")
+            return res
 
     def _update_one(self, name: str, old: Optional[dict[str, Any]]) -> ContainerJobResult:
         res = ContainerJobResult(name=name, result="failed")
@@ -875,7 +950,11 @@ def _build_plan(docker_client: Any, manual: bool, names: Optional[list[str]]) ->
     if names is not None:
         candidates: Optional[set[str]] = set(names)
     elif manual:
-        candidates = {n for n, r in db_map.items() if r.get("update_available")}
+        # 手动全量更新：排除自身容器（自身容器需单独点击卡片自更，避免全量更新时中断自身服务）
+        candidates = {
+            n for n, r in db_map.items()
+            if r.get("update_available") and not r.get("is_self") and not is_self_container(next((c for c in containers if c["name"] == n), None))
+        }
     else:
         candidates = None
     delay_raw = db.setting_get("delay_update_sec")

@@ -57,6 +57,9 @@ const modeLabel = computed(() => MODES.find(m => m.v === props.c.mode)?.t || 'Au
 
 // 实际生效状态说明：模式 × 自动开关 → 一句话讲清行为（问题 3）
 const effectHint = computed(() => {
+  if (props.c.is_self) {
+    return { icon: 'lock', text: 'ContainerUp 自身实例 — 默认豁免自动停止，支持一键守护自更与手动更新', cls: 'text-brand-500' }
+  }
   if (props.c.ignored) {
     return { icon: 'eye', text: '已忽略 — 不再检测与更新', cls: 'text-slate-400' }
   }
@@ -107,10 +110,18 @@ async function toggleIgnore(v) {
 }
 
 async function update() {
+  let title = `更新 ${props.c.name}？`
+  let message = '相关联容器将按依赖顺序处理，失败自动回滚。'
+  let okText = '更新'
+  if (props.c.is_self) {
+    title = `更新 ContainerUp 自身容器？`
+    message = 'ContainerUp 将拉起独立解耦守护容器，在数秒内自动平滑完成新版本重建并重启服务（网页将短暂断开后自动恢复）。若有顾虑，您也可使用「查看更新命令」在宿主机终端手动更新。'
+    okText = '启动守护自更'
+  }
   const ok = await confirmDialog({
-    title: `更新 ${props.c.name}？`,
-    message: '相关联容器将按依赖顺序处理，失败自动回滚。',
-    okText: '更新',
+    title,
+    message,
+    okText,
   })
   if (!ok) return
   try {
@@ -139,6 +150,38 @@ async function simFail() {
     toast(`已预设 ${props.c.name} 重建后 unhealthy，点"更新"观察自动回滚`)
     log(`[剧本] ${props.c.name} 下一次重建将模拟启动失败 → 验证回滚`, 'warn')
   } catch (e) { toast(e.message, true) }
+}
+
+// 手动更新命令弹窗（宿主机 CLI / Docker Compose 命令）
+const cmdOpen = ref(false)
+const cmdLoading = ref(false)
+const cmdInfo = ref(null)
+
+async function openUpdateCommand() {
+  menuOpen.value = false
+  cmdLoading.value = true
+  cmdOpen.value = true
+  try {
+    cmdInfo.value = await api(`/containers/${props.c.name}/update_command`)
+  } catch (e) {
+    toast('获取更新命令失败：' + e.message, true)
+    cmdOpen.value = false
+  } finally {
+    cmdLoading.value = false
+  }
+}
+
+function copyCommand(text) {
+  if (!text) return
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text).then(() => {
+      toast('已复制更新命令到剪贴板')
+    }).catch(() => {
+      toast('复制失败，请手动选取文本复制', true)
+    })
+  } else {
+    toast('请手动选取文本复制')
+  }
 }
 
 // 回退：拉取版本台账 → 弹窗选择历史版本（默认选中上一个版本）
@@ -214,7 +257,10 @@ async function removeContainer() {
       <!-- 头部：标题块靠左，状态徽章右锚对齐 -->
       <header class="flex items-start justify-between gap-3">
         <div class="min-w-0">
-          <h3 class="text-[15px] font-bold leading-6 text-slate-900 dark:text-white truncate">{{ c.name }}</h3>
+          <div class="flex items-center gap-1.5 flex-wrap">
+            <h3 class="text-[15px] font-bold leading-6 text-slate-900 dark:text-white truncate">{{ c.name }}</h3>
+            <span v-if="c.is_self" class="badge !text-[10px] bg-brand-500/10 text-brand-600 dark:text-brand-400 font-semibold shrink-0">系统自身</span>
+          </div>
           <div class="mt-0.5 flex items-center gap-1 text-xs text-slate-400">
             <Icon name="layers" cls="w-3.5 h-3.5" />
             <span class="truncate">{{ c.compose_id || '独立容器' }}</span>
@@ -296,10 +342,10 @@ async function removeContainer() {
         </div>
 
         <label class="flex items-center gap-1.5 cursor-pointer select-none shrink-0 h-7"
-          title="发现新版本时自动更新（大版本升级仍需人工）">
+          :title="c.is_self ? 'ContainerUp 自身容器豁免自动更新以防死锁，支持手动守护自更' : '发现新版本时自动更新（大版本升级仍需人工）'">
           <span class="text-xs text-slate-500 dark:text-slate-400">自动</span>
           <span class="relative inline-block w-8 h-[18px]">
-            <input type="checkbox" class="sr-only peer" :checked="!!c.update_enabled && !c.ignored" :disabled="c.ignored || c.protected"
+            <input type="checkbox" class="sr-only peer" :checked="!!c.update_enabled && !c.ignored" :disabled="c.ignored || (c.protected && !c.is_self) || c.is_self"
               @change="toggleUpdate($event.target.checked)" />
             <span class="absolute inset-0 rounded-full bg-slate-300 dark:bg-slate-600 peer-checked:bg-brand-600
                          transition-colors duration-200"></span>
@@ -310,14 +356,14 @@ async function removeContainer() {
 
         <span class="flex-1"></span>
 
-        <button v-if="!c.ignored && !c.protected" @click="update()"
+        <button v-if="(!c.ignored && !c.protected) || c.is_self" @click="update()"
           class="h-7 px-3 inline-flex items-center gap-1 rounded-md bg-brand-600 hover:bg-brand-700
                  text-white text-xs font-semibold transition-colors active:scale-95">
-          <Icon name="rocket" cls="w-3.5 h-3.5" /> 更新
+          <Icon name="rocket" cls="w-3.5 h-3.5" /> {{ c.is_self ? '守护自更' : '更新' }}
         </button>
 
         <!-- 更多菜单：所有卡片统一保留（点击外部/Esc 关闭） -->
-        <div ref="menuRef" class="relative shrink-0" v-if="!c.protected">
+        <div ref="menuRef" class="relative shrink-0" v-if="!c.protected || c.is_self">
           <button @click="menuOpen = !menuOpen"
             class="h-7 w-7 inline-flex items-center justify-center rounded-md
                    border border-slate-200 dark:border-slate-600 text-slate-400
@@ -329,6 +375,10 @@ async function removeContainer() {
             <div v-if="menuOpen"
               class="absolute right-0 bottom-[calc(100%+6px)] z-30 w-44 rounded-xl overflow-hidden shadow-lift
                      bg-white dark:bg-slate-800 border border-slate-200/80 dark:border-slate-700 py-1 animate-pop">
+              <button @click="openUpdateCommand()"
+                class="w-full flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-brand-600 dark:text-brand-400 hover:bg-brand-50 dark:hover:bg-brand-500/10 transition-colors">
+                <Icon name="terminal" cls="w-3.5 h-3.5" /> 查看更新命令
+              </button>
               <button v-if="demo" @click="simFail(); menuOpen = false"
                 class="w-full flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-500/10 transition-colors">
                 <Icon name="fire" cls="w-3.5 h-3.5" /> 模拟失败剧本
@@ -415,6 +465,54 @@ async function removeContainer() {
             class="btn !px-4 text-white bg-brand-600 hover:bg-brand-700 transition-colors active:scale-95 disabled:opacity-50">
             {{ rbBusy ? '回退中…' : '回退到此版本' }}
           </button>
+        </div>
+      </template>
+    </Modal>
+
+    <!-- 查看更新命令弹窗（宿主机 CLI / Docker Compose 手动更新） -->
+    <Modal :open="cmdOpen" :title="`手动更新命令 · ${c.name}`" @close="cmdOpen = false">
+      <div v-if="cmdLoading" class="py-6 text-center text-xs text-slate-400">生成命令中…</div>
+      <template v-else-if="cmdInfo">
+        <p class="text-[12px] text-slate-500 dark:text-slate-400">
+          如需在宿主机直接更新或排查问题，可复制以下命令在宿主机终端中执行：
+        </p>
+
+        <div v-if="cmdInfo.commands?.compose" class="mt-3">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+              <Icon name="layers" cls="w-3.5 h-3.5 text-brand-500" /> Docker Compose 更新命令
+            </span>
+            <button @click="copyCommand(cmdInfo.commands.compose)" class="text-[11px] text-brand-600 dark:text-brand-400 hover:underline">复制</button>
+          </div>
+          <pre class="p-2.5 rounded-xl bg-slate-900 text-slate-100 font-mono text-xs overflow-x-auto select-all whitespace-pre-wrap break-all">{{ cmdInfo.commands.compose }}</pre>
+        </div>
+
+        <div v-if="cmdInfo.commands?.compose_cd" class="mt-3">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+              <Icon name="folder" cls="w-3.5 h-3.5 text-brand-500" /> 进入目录更新（推荐）
+            </span>
+            <button @click="copyCommand(cmdInfo.commands.compose_cd)" class="text-[11px] text-brand-600 dark:text-brand-400 hover:underline">复制</button>
+          </div>
+          <pre class="p-2.5 rounded-xl bg-slate-900 text-slate-100 font-mono text-xs overflow-x-auto select-all whitespace-pre-wrap break-all">{{ cmdInfo.commands.compose_cd }}</pre>
+        </div>
+
+        <div v-if="cmdInfo.commands?.docker_run" class="mt-3">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+              <Icon name="terminal" cls="w-3.5 h-3.5 text-brand-500" /> Docker Run 完整参数重建命令
+            </span>
+            <button @click="copyCommand(cmdInfo.commands.docker_run)" class="text-[11px] text-brand-600 dark:text-brand-400 hover:underline">复制</button>
+          </div>
+          <pre class="p-2.5 rounded-xl bg-slate-900 text-slate-100 font-mono text-xs overflow-x-auto select-all whitespace-pre-wrap break-all max-h-40">{{ cmdInfo.commands.docker_run }}</pre>
+        </div>
+
+        <div v-if="c.is_self" class="mt-3.5 p-3 rounded-xl bg-brand-50 dark:bg-brand-500/10 text-[11.5px] leading-5 text-brand-700 dark:text-brand-300">
+          <span class="font-bold">🛡️ 自更说明：</span>除上述宿主机命令外，您也可在卡片上直接点击「守护自更」，ContainerUp 会拉起独立守护容器无缝完成重建，无需登录宿主机。
+        </div>
+
+        <div class="mt-4 flex justify-end">
+          <button @click="cmdOpen = false" class="btn-ghost !px-4">关闭</button>
         </div>
       </template>
     </Modal>

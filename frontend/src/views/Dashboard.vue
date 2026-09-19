@@ -45,9 +45,18 @@ async function doScan(force) {
   busy.value = true
   try {
     log(force ? '强制扫描（无视防抖重播）…' : '立即扫描…', 'info')
-    const r = await api('/scan' + (force ? '?force=true' : ''), { method: 'POST' })
+    const r = await api('/scan?auto_update=true' + (force ? '&force=true' : ''), { method: 'POST' })
     if (r.status === 'ok') {
-      toast(`扫描完成：检查 ${r.checked} · 新通知 ${r.events} · 错误 ${r.errors}`)
+      let msg = `扫描完成：检查 ${r.checked} · 新通知 ${r.events} · 错误 ${r.errors}`
+      if (r.update) {
+        const upd = r.update
+        const containers = upd.containers || []
+        const okCount = containers.filter(c => c.result === 'updated').length
+        const rbCount = containers.filter(c => c.result === 'rolled_back').length
+        msg += ` | 自动触发更新 #${upd.job_id}：成功 ${okCount} · 回滚 ${rbCount}`
+        log(`扫描联动自动更新完成 #${upd.job_id}：${containers.map(c => `${c.name}=${c.result}`).join(', ')}`, rbCount ? 'warn' : 'ok')
+      }
+      toast(msg)
       log(`扫描完成：checked=${r.checked} events=${r.events} errors=${r.errors} 用时 ${r.duration_ms}ms${r.force ? '（强制）' : ''}`, r.errors ? 'warn' : 'ok')
       for (const e of r.errors_detail || []) log(`检测失败 ${e.name}：${e.error}`, 'err')
     } else {
