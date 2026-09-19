@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
     scheduler.stop()
 
 
-app = FastAPI(title="容器守望者", version="1.1.4", lifespan=lifespan)
+app = FastAPI(title="容器守望者", version="1.1.5", lifespan=lifespan)
 
 
 # ---------- 认证依赖 ----------
@@ -323,6 +323,15 @@ def set_update_enabled(name: str, body: FlagBody, user: str = Depends(require_au
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="not found")
     return {"status": "ok", "update_enabled": body.value}
+
+
+@app.delete("/api/containers/{name}")
+def delete_container(name: str, user: str = Depends(require_auth)) -> dict[str, Any]:
+    with db.tx() as conn:
+        cur = conn.execute("DELETE FROM containers WHERE name=?", (name,))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="not found")
+    return {"status": "ok", "deleted": name}
 
 
 @app.post("/api/containers/{name}/update")

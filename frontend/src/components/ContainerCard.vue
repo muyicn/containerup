@@ -185,6 +185,23 @@ async function doRollback() {
   } catch (e) { toast('回退失败：' + e.message, true); log(`回退失败：${e.message}`, 'err') }
   finally { rbBusy.value = false }
 }
+
+async function removeContainer() {
+  menuOpen.value = false
+  const ok = await confirmDialog({
+    title: `移除容器记录 ${props.c.name}？`,
+    message: '仅从监控台账中移除该记录（不会影响宿主机实际运行的容器）。如果宿主机上该容器已被删除，此操作可直接清除界面残留。',
+    okText: '确认移除',
+  })
+  if (!ok) return
+  try {
+    await api(`/containers/${props.c.name}`, { method: 'DELETE' })
+    toast(`已移除 ${props.c.name}`)
+    emit('refresh')
+  } catch (e) {
+    toast('移除失败：' + (e.message || '未知错误'), true)
+  }
+}
 </script>
 
 <template>
@@ -327,6 +344,10 @@ async function doRollback() {
               <button v-else @click="toggleIgnore(true); menuOpen = false"
                 class="w-full flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-500/10 transition-colors">
                 <Icon name="eye" cls="w-3.5 h-3.5" /> 忽略此容器
+              </button>
+              <button @click="removeContainer()"
+                class="w-full flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-slate-500 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-500/10 transition-colors">
+                <Icon name="trash" cls="w-3.5 h-3.5" /> 移除监控记录
               </button>
             </div>
           </Transition>

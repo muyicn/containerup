@@ -123,14 +123,12 @@ def _sync_containers(docker_client: Any) -> dict[str, dict[str, Any]]:
                 (name, image_spec, compose_id, service, "auto", protected,
                  repo_digest or None, image_version or None),
             )
-    # 已消失的容器：清 update_available（继承上游 v1.41 修复语义）
+    # 宿主机已物理移除（docker rm / compose down）的容器：从监控台账中同步清理，杜绝幽灵容器
     rows = db.query("SELECT name FROM containers")
     for r in rows:
         if r["name"] not in runtime_names:
             with db.tx() as conn:
-                conn.execute(
-                    "UPDATE containers SET update_available=0 WHERE name=?", (r["name"],)
-                )
+                conn.execute("DELETE FROM containers WHERE name=?", (r["name"],))
     return {c["name"]: c for c in runtime}
 
 

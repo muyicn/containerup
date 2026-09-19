@@ -221,6 +221,17 @@ class TestDetectAndNotify:
         assert out["status"] == "scan already running"
         t.join()
 
+    def test_vanished_container_pruned_on_scan(self, seeded_client, monkeypatch):
+        """宿主机物理删除的容器：扫描时自动清理数据库幽灵记录，避免残留。"""
+        monkeypatch.setattr(detect, "make_registry_client", lambda: REGISTRY)
+        scan(seeded_client)
+        assert db.query_one("SELECT * FROM containers WHERE name='solo-cache'") is not None
+        # 模拟宿主机通过 docker rm 删除了 solo-cache
+        del seeded_client._containers["solo-cache"]
+        scan(seeded_client)
+        assert db.query_one("SELECT * FROM containers WHERE name='solo-cache'") is None
+
+
 
 class TestWatches:
     def test_watch_baseline_recorded(self, seeded_client, monkeypatch):

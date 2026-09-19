@@ -256,3 +256,13 @@ class TestWatchesAndSettings:
         assert tc.post("/api/channels/test", json={"kind": "bogus", "url": "http://x"}).status_code == 422
         assert len(tc.get("/api/channels").json()) == 2
         assert tc.delete("/api/channels/1").status_code == 200
+
+    def test_delete_container_record(self, client):
+        tc, _ = client
+        tc.post("/api/auth/setup", json={"username": "admin", "password": "admin123456"})
+        tc.post("/api/scan")
+        assert tc.delete("/api/containers/demo-web").status_code == 200
+        assert tc.delete("/api/containers/demo-web").status_code == 404
+        names = [c["name"] for c in tc.get("/api/containers").json()]
+        assert "demo-web" not in names
+
