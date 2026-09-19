@@ -1,13 +1,3 @@
----
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: '97044efe-4586-4011-a31b-44af2eb7d2ac'
-  PropagateID: '97044efe-4586-4011-a31b-44af2eb7d2ac'
-  ReservedCode1: '904af496-9fc2-4e26-96e2-cd60fa8b697a'
-  ReservedCode2: '904af496-9fc2-4e26-96e2-cd60fa8b697a'
----
 
 # 容器守望者 (ContainerUp)
 
@@ -25,10 +15,12 @@ AIGC:
 
 ---
 
+
 ## 📖 平台简介
 
 **ContainerUp（容器守望者）** 融合了自动更新执行引擎与双模式版本检测机制。不同于传统的 Watchtower 等简单粗暴的更新工具，ContainerUp 聚焦于**高保真配置重建**、**拓扑依赖感知**、**智能健康门控**与**秒级自动/手动回滚**，保证您在家用 NAS 或私有服务器上的关键容器永远稳定可用。
 
+<img width="1862" height="1099" alt="Image" src="https://github.com/user-attachments/assets/920f42db-cf6d-4c7b-9666-bf0683344d13" />
 ---
 
 ## 🌟 核心功能特性清单
