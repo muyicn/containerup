@@ -22,6 +22,9 @@ class DockerError(RuntimeError):
     pass
 
 
+logger = logging.getLogger("docker")
+
+
 # 平台托管标记：容器显式打上 dev.containerup.managed=false 时，扫描跳过该容器
 MANAGED_LABEL = "dev.containerup.managed"
 
@@ -244,11 +247,20 @@ class LocalDockerClient:
         for line in raw.splitlines():
             if not line.strip():
                 continue
-            c = json.loads(line)
+            try:
+                c = json.loads(line)
+            except Exception:
+                continue
             name = c.get("Names", "")
             if not name:
                 continue
-            info = self.inspect(name)
+            try:
+                info = self.inspect(name)
+            except Exception as e:
+                # 宿主机上瞬态容器（如自更辅助容器、一次性 cron 或已被物理移除的容器）
+                # 在 ps 与 inspect 间隙退出/销毁，属于正常竞态，记录调试日志并跳过，不阻断主流程
+                logger.debug("inspect 容器 %s 失败（可能已退出或删除）: %s", name, e)
+                continue
             if (info.get("labels") or {}).get(MANAGED_LABEL, "").strip().lower() == "false":
                 continue
             out.append(info)
@@ -256,7 +268,10 @@ class LocalDockerClient:
 
     def inspect(self, name: str) -> dict[str, Any]:
         raw = self._run("inspect", name)
-        data = json.loads(raw)[0]
+        parsed = json.loads(raw)
+        if not parsed or not isinstance(parsed, list):
+            raise DockerError(f"docker inspect {name} 返回空或非列表")
+        data = parsed[0]
         labels = (data.get("Config") or {}).get("Labels") or {}
         state = data.get("State") or {}
         health = (state.get("Health") or {}).get("Status", "none")

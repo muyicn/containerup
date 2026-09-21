@@ -524,13 +524,20 @@ def del_watch(wid: int, user: str = Depends(require_auth)) -> dict[str, Any]:
 
 @app.post("/api/scan")
 def do_scan(force: bool = False, auto_update: bool = False, user: str = Depends(require_auth)) -> dict[str, Any]:
-    res = detect.scan(DOCKER, force=force)
+    try:
+        res = detect.scan(DOCKER, force=force)
+    except Exception as e:
+        logger.exception("扫描执行失败: %s", e)
+        raise HTTPException(status_code=500, detail=f"扫描执行失败: {e}")
+
     auto_upd_setting = db.setting_get("auto_update_after_scan", "1")
-    if auto_update and auto_upd_setting == "1" and engine.auto_update_pending(DOCKER):
+    if auto_update and auto_upd_setting == "1":
         try:
-            upd_res = engine.run_update(DOCKER, manual=False, health_wait_sec=_health_wait())
-            res["update"] = upd_res
+            if engine.auto_update_pending(DOCKER):
+                upd_res = engine.run_update(DOCKER, manual=False, health_wait_sec=_health_wait())
+                res["update"] = upd_res
         except Exception as e:
+            logger.warning("扫描后自动更新执行失败: %s", e)
             res["update_error"] = str(e)
     return res
 

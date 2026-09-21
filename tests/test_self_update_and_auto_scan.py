@@ -180,3 +180,53 @@ def test_api_get_update_command(client):
     assert "docker compose -p containerup-stack" in data["commands"]["compose"]
     assert "compose_cd" in data["commands"]
     assert "cd /opt" in data["commands"]["compose_cd"]
+
+
+def test_local_docker_client_list_containers_transient_race(monkeypatch):
+    """测试 LocalDockerClient.list_containers 在瞬态容器消失时的容错韧性。"""
+    from backend.docker import LocalDockerClient, DockerError
+    import json
+
+    client = LocalDockerClient()
+    fake_ps = (
+        json.dumps({"Names": "alive-container"}) + "\n" +
+        json.dumps({"Names": "ephemeral-vanished-container"}) + "\n"
+    )
+
+    def fake_run(*args):
+        if args[0] == "ps":
+            return fake_ps
+        elif args[0] == "inspect":
+            target = args[1]
+            if target == "alive-container":
+                return json.dumps([{
+                    "Name": "/alive-container",
+                    "Id": "12345",
+                    "Config": {"Image": "nginx:alpine", "Labels": {}},
+                    "State": {"Running": True, "Health": {"Status": "healthy"}},
+                    "Image": "sha256:111",
+                }])
+            else:
+                raise DockerError(f"docker inspect {target} 失败: Error: No such container: {target}")
+        raise DockerError(f"unexpected call: {args}")
+
+    monkeypatch.setattr(client, "_run", fake_run)
+    res = client.list_containers()
+    assert len(res) == 1
+    assert res[0]["name"] == "alive-container"
+
+
+def test_api_scan_exception_handling(client, monkeypatch):
+    """测试 /api/scan 在底层抛出未预期异常时能友好捕获并返回诊断信息，而非裸 500。"""
+    tc, _ = client
+
+    def raise_scan(*args, **kwargs):
+        raise RuntimeError("Docker daemon connection lost")
+
+    monkeypatch.setattr("backend.detect.scan", raise_scan)
+    r = tc.post("/api/scan")
+    assert r.status_code == 500
+    detail = r.json().get("detail", "")
+    assert "Docker daemon connection lost" in detail
+    assert "扫描执行失败" in detail
+

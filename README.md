@@ -18,8 +18,8 @@ AIGC:
 
 <p align="center">
   <img src="https://img.shields.io/badge/Docker-learycn%2Fcontainerup-blue?logo=docker" alt="Docker Image" />
-  <img src="https://img.shields.io/badge/Version-v1.1.6-emerald" alt="Version" />
-  <img src="https://img.shields.io/badge/Tests-137%20passed-brightgreen" alt="Tests" />
+  <img src="https://img.shields.io/badge/Version-v1.1.7-emerald" alt="Version" />
+  <img src="https://img.shields.io/badge/Tests-139%20passed-brightgreen" alt="Tests" />
   <img src="https://img.shields.io/badge/License-MIT-slate" alt="License" />
 </p>
 
